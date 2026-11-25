@@ -12,6 +12,8 @@ from mediaforge.rag.retriever import ReferenceRetriever
 from mediaforge.rag.vector_store import VectorStore
 
 RRF_FALLBACK_MIN_SCORE = 0.025
+# With Milvus RRF k=60, a single route scores at most 1/61.
+RRF_KEYWORD_MIN_SCORE = 0.014
 
 _CATEGORY_FAMILIES = {
     "top": ("t恤", "上衣", "衬衫", "针织", "毛衣", "背心", "tee", "shirt", "top", "blouse", "sweater", "cardigan", "tank"),
@@ -267,14 +269,18 @@ class RAGSearchTool(BaseTool):
 
         minimum_score = get_settings().agent_rag_min_score
         if self.embed_client is not None and not used_rerank:
-            minimum_score = RRF_FALLBACK_MIN_SCORE
+            minimum_score = (
+                RRF_KEYWORD_MIN_SCORE
+                if query_dense is None and query_image is None
+                else RRF_FALLBACK_MIN_SCORE
+            )
         logger.info(
             "Agent RAG candidates score_type={} threshold={} scores={}",
             score_type,
             minimum_score,
             [(item.product_id, round(item.score, 4)) for item in refs],
         )
-        refs = [item for item in refs if item.score >= minimum_score]
+        refs = [item for item in refs if item.score >= minimum_score][:top_k]
 
         results = [
             {

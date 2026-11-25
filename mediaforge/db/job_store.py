@@ -159,21 +159,37 @@ class JobStore:
         """Mark one SKU running. Terminal items are idempotently skipped."""
         table = JobItemTable.__table__
         async with self.engine.begin() as conn:
-            current = (
-                await conn.execute(
-                    select(table.c.status).where(
-                        table.c.job_id == _as_uuid(job_id), table.c.sku_id == sku_id
-                    )
-                )
-            ).scalar_one()
-            if current in {"done", "partial_fail", "failed"}:
-                return False
-            await conn.execute(
+            result = await conn.execute(
                 update(table)
-                .where(table.c.job_id == _as_uuid(job_id), table.c.sku_id == sku_id)
+                .where(
+                    table.c.job_id == _as_uuid(job_id),
+                    table.c.sku_id == sku_id,
+                    table.c.status.not_in(("done", "partial_fail", "failed")),
+                )
                 .values(status="running", error_msg=None, updated_at=datetime.now(timezone.utc))
             )
-        return True
+        return bool(result.rowcount)
+
+    async def fail_unqueued_job_item(self, job_id: str, sku_id: str) -> None:
+        """Record a publish failure if the worker has not already started the SKU."""
+        table = JobItemTable.__table__
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                update(table)
+                .where(
+                    table.c.job_id == _as_uuid(job_id),
+                    table.c.sku_id == sku_id,
+                    table.c.status == "pending",
+                )
+                .values(
+                    status="failed",
+                    failed_assets=1,
+                    error_msg="任务队列暂时不可用，请重试",
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+        if result.rowcount:
+            await self.refresh_job_progress(job_id)
 
     async def complete_job_item(
         self,
@@ -246,6 +262,9 @@ class JobStore:
         job_uuid = _as_uuid(job_id)
         terminal = ["done", "partial_fail", "failed"]
         async with self.engine.begin() as conn:
+            await conn.execute(
+                select(job.c.job_id).where(job.c.job_id == job_uuid).with_for_update()
+            )
             counts = (
                 await conn.execute(
                     select(

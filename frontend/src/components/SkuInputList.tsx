@@ -13,6 +13,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { assetPreviewHref } from '@/lib/asset-file'
 import type {
   Asset,
   AssetStatus,
@@ -526,7 +527,7 @@ function SkuRow({
                     )}
                     {a.file_path && (
                       <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" asChild>
-                        <a href={resolveImgUrl(a.file_path) || '#'} target="_blank" rel="noreferrer">
+                        <a href={assetPreviewHref(a.file_path)} target="_blank" rel="noreferrer">
                           {a.status === 'failed' ? '查看失败图' : '查看'}
                         </a>
                       </Button>

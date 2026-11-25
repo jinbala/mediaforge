@@ -1,5 +1,6 @@
-/** @type {import('next').NextConfig} */
-const nextConfig = {
+import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
   distDir: 'dist',
   outputFileTracingRoot: __dirname,
   turbopack: {
@@ -36,10 +37,11 @@ const nextConfig = {
       '/agent',
       '/batch',
       '/tasks',
+      '/asset',
       '/products',
       '/settings/:path*',
     ].map((source) => ({ source, headers: noStore }))
   },
 }
 
-module.exports = nextConfig
+export default nextConfig

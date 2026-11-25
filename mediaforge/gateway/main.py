@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from os import getenv
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -56,7 +57,8 @@ async def lifespan(app: FastAPI):
         vector_store = get_vector_store()
         health = await vector_store.health()
         if health.get("count", 0) == 0:
-            default_csv = Path(__file__).resolve().parents[2] / "data" / "products.csv"
+            project_root = Path(__file__).resolve().parents[2]
+            default_csv = project_root / "data" / "products.csv"
             if default_csv.exists():
                 logger.info("RAG vector store is empty, auto-seeding from {}", default_csv)
                 from mediaforge.gateway.routers.rag import _parse_csv, _rows_to_items
@@ -66,7 +68,10 @@ async def lifespan(app: FastAPI):
                 rows = _parse_csv(content)
                 rows = _rows_to_items(rows)
                 if rows:
-                    await embed_and_upsert(rows)
+                    await embed_and_upsert(
+                        rows,
+                        image_base_dir=getenv("RAG_IMAGE_BASE_DIR") or str(project_root / "images"),
+                    )
     except Exception as exc:
         logger.warning("Auto-seed RAG failed (non-fatal): {}", exc)
 

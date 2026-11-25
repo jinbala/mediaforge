@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "types": ["node"],
+    "noEmit": false,
+    "incremental": false,
+    "rootDir": "product-browser",
+    "outDir": "build/product-browser"
+  },
+  "include": ["product-browser/**/*.cts"]
+}

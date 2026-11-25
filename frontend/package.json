@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3100",
     "build": "next build",
+    "build:product-browser": "tsc -p tsconfig.product-browser.json",
     "start": "next start -p 3100",
     "lint": "eslint ."
   },
@@ -36,6 +37,7 @@
     "@types/react-dom": "^19.2.4",
     "eslint": "^9.39.5",
     "eslint-config-next": "16.3.0",
+    "playwright-core": "1.65.1",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.1",
     "typescript": "^5"

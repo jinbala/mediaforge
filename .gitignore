@@ -54,7 +54,7 @@ tmp/
 *.inspect.ndjson
 
 # Frontend
-frontend/node_modules/
+node_modules/
 frontend/.next/
 frontend/dist/
 frontend/out/

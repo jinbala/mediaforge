@@ -7,8 +7,16 @@ from mediaforge.rag.models import RagResult
 from mediaforge.rag.vector_store import VectorStore
 
 
+def _cache_version_key(tenant_id: str) -> str:
+    return f"mediaforge:rag_cache_version:{tenant_id}"
+
+
+async def invalidate_tenant_rag_cache(redis, tenant_id: str) -> None:
+    await redis.incr(_cache_version_key(tenant_id))
+
 
 def _cache_key(
+    version: int,
     text: str,
     category: str,
     tenant_id: str,
@@ -21,7 +29,7 @@ def _cache_key(
     if query_image:
         img_sig = hashlib.sha256(json.dumps(query_image[:10]).encode()).hexdigest()[:12]
     raw = (
-        f"rag:{tenant_id}:{text}:{category}:{top_k}:{img_sig}:"
+        f"rag:v2:{tenant_id}:{version}:{text}:{category}:{top_k}:{img_sig}:"
         f"{min_sales_count}:{quality_status}"
     )
     return f"mediaforge:rag_cache:{hashlib.sha256(raw.encode()).hexdigest()[:32]}"
@@ -52,12 +60,14 @@ class CachedRetriever:
         min_sales_count: int = 0,
         quality_status: str = "",
     ) -> list[RagResult]:
+        key = None
         if self.redis is not None:
-            key = _cache_key(
-                text, category, tenant_id, top_k, query_image,
-                min_sales_count, quality_status,
-            )
             try:
+                version = int(await self.redis.get(_cache_version_key(tenant_id)) or 0)
+                key = _cache_key(
+                    version, text, category, tenant_id, top_k, query_image,
+                    min_sales_count, quality_status,
+                )
                 cached = await self.redis.get(key)
                 if cached:
                     items = json.loads(cached)
@@ -77,11 +87,7 @@ class CachedRetriever:
             quality_status=quality_status,
         )
 
-        if self.redis is not None and results:
-            key = _cache_key(
-                text, category, tenant_id, top_k, query_image,
-                min_sales_count, quality_status,
-            )
+        if key is not None and results:
             try:
                 payload = json.dumps([r.model_dump() for r in results])
                 await self.redis.set(key, payload, ex=self.TTL_SECONDS)

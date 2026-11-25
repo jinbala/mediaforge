@@ -1,10 +1,16 @@
 import csv
 import io
+import json
 from pathlib import Path
+from xml.etree.ElementTree import ParseError
+from zipfile import BadZipFile
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from loguru import logger
-from pydantic import BaseModel
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from mediaforge.config import get_settings
 from mediaforge.gateway.dependencies import get_tenant_only
@@ -13,6 +19,7 @@ from mediaforge.models.tenant import Tenant
 from mediaforge.rag.embeddings import DashScopeEmbeddingClient
 from mediaforge.rag.factory import get_vector_store
 from mediaforge.rag.models import RagResult
+from mediaforge.rag.product_share import ProductShareError, preview_product_share
 
 router = APIRouter(prefix="/api/v1/rag")
 
@@ -28,6 +35,28 @@ ALLOWED_CONTENT_TYPES = {
 class IngestResponse(BaseModel):
     accepted: int
     message: str
+
+
+class IngestPreviewRow(BaseModel):
+    product_id: str
+    image_ref: str
+    has_image_url: bool
+    image_name: str
+
+
+class IngestPreviewResponse(BaseModel):
+    rows: list[IngestPreviewRow]
+    skipped: int
+
+
+class ProductLinkRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=16_000)
+
+
+class ProductLinkPreview(BaseModel):
+    product_id: str
+    title: str
+    image_data: str
 
 
 class IngestStatusResponse(BaseModel):
@@ -55,45 +84,110 @@ class SearchResponse(BaseModel):
 
 
 def _parse_csv(content: bytes) -> list[dict]:
-    text = content.decode("utf-8-sig")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("gb18030")
     reader = csv.DictReader(io.StringIO(text))
-    rows = list(reader)
-    if not rows:
-        raise ValueError("CSV file is empty")
-    missing = REQUIRED_COLS - set(rows[0].keys())
-    if missing:
-        raise ValueError(f"Missing required columns: {sorted(missing)}")
-    return rows
+    reader.fieldnames = [header.strip() for header in (reader.fieldnames or [])]
+    _check_headers(reader.fieldnames)
+    return list(reader)
 
 
 def _parse_excel(content: bytes) -> list[dict]:
+    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     try:
-        import openpyxl
-    except ImportError:
-        raise HTTPException(
-            status_code=422, detail="openpyxl not installed; use CSV format or install openpyxl"
-        )
-    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-    ws = wb.active
-    rows_iter = ws.iter_rows(values_only=True)
-    headers = [str(h).strip() if h is not None else "" for h in next(rows_iter)]
+        rows = wb.active.iter_rows(values_only=True)
+        headers = [str(cell or "").strip() for cell in next(rows, ())]
+        _check_headers(headers)
+        return [dict(zip(headers, row)) for row in rows if any(cell is not None for cell in row)]
+    finally:
+        wb.close()
+
+
+def _check_headers(headers: list[str]) -> None:
+    if not headers:
+        raise ValueError("表格是空的，请使用导入模板填写商品。")
     missing = REQUIRED_COLS - set(headers)
     if missing:
-        raise ValueError(f"Missing required columns: {sorted(missing)}")
-    rows = [dict(zip(headers, row)) for row in rows_iter if any(c is not None for c in row)]
-    wb.close()
-    return rows
+        raise ValueError(f"表格缺少必填列：{', '.join(sorted(missing))}")
 
 
 def _rows_to_items(rows: list[dict]) -> list[dict]:
     seen: set[str] = set()
     clean: list[dict] = []
     for row in rows:
-        pid = str(row.get("product_id", "")).strip()
+        value = row.get("product_id")
+        pid = str(value).strip() if value is not None else ""
         if pid and pid not in seen:
             seen.add(pid)
-            clean.append(row)
+            clean.append({**row, "product_id": pid})
     return clean
+
+
+async def _read_catalog(file: UploadFile) -> tuple[list[dict], int]:
+    filename = (file.filename or "").lower()
+    ct = (file.content_type or "").split(";")[0].strip().lower()
+    if filename.endswith(".xls"):
+        raise HTTPException(415, "旧版 .xls 请先另存为 .xlsx 或 CSV 后再导入。")
+    if not filename.endswith((".xlsx", ".csv")) and ct not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(415, "请选择 .xlsx 或 .csv 表格。")
+    is_excel = filename.endswith(".xlsx") or (
+        not filename.endswith(".csv") and ct == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    limit = get_settings().max_upload_size
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(413, "表格超过上传大小限制。")
+    try:
+        parsed = await run_in_threadpool(_parse_excel if is_excel else _parse_csv, content)
+    except (UnicodeDecodeError, csv.Error, BadZipFile, InvalidFileException, ParseError, KeyError, OSError) as exc:
+        raise HTTPException(422, "无法读取表格，请检查文件格式，或用 Excel 另存为 .xlsx 后重试。") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    rows = _rows_to_items(parsed)
+    if not rows:
+        raise HTTPException(422, "表格里没有填写 SKU（product_id）的商品。")
+    return rows, len(parsed) - len(rows)
+
+
+def _image_filename(value: str) -> str:
+    return value.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _image_reference(row: dict) -> IngestPreviewRow:
+    ref = str(row.get("image_url") or row.get("image_path") or "").strip()
+    has_image_url = ref.startswith(("http://", "https://", "data:"))
+    return IngestPreviewRow(
+        product_id=row["product_id"],
+        image_ref="表格内嵌图片" if ref.startswith("data:") else ref,
+        has_image_url=has_image_url,
+        image_name="" if has_image_url else _image_filename(ref).lower(),
+    )
+
+
+@router.post("/ingest/preview", response_model=IngestPreviewResponse)
+@limiter.limit("30/minute")
+async def preview_products(
+    request: Request,
+    file: UploadFile = File(...),
+    tenant: Tenant = Depends(get_tenant_only),
+) -> IngestPreviewResponse:
+    rows, skipped = await _read_catalog(file)
+    return IngestPreviewResponse(rows=[_image_reference(row) for row in rows], skipped=skipped)
+
+
+@router.post("/ingest/link/preview", response_model=ProductLinkPreview)
+@limiter.limit("15/minute")
+async def preview_product_link(
+    request: Request,
+    body: ProductLinkRequest,
+    tenant: Tenant = Depends(get_tenant_only),
+) -> ProductLinkPreview:
+    try:
+        return ProductLinkPreview(**await preview_product_share(body.text))
+    except ProductShareError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 async def _embed_and_upsert(
@@ -120,37 +214,20 @@ async def ingest_products(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     images: list[UploadFile] = File(default=[]),
+    image_assignments: str = Form(default="{}"),
     tenant: Tenant = Depends(get_tenant_only),
 ) -> IngestResponse:
-    settings = get_settings()
-
-    ct = (file.content_type or "").split(";")[0].strip().lower()
-    filename = (file.filename or "").lower()
-    is_excel = filename.endswith((".xlsx", ".xls")) or ct in (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
-    )
-    is_csv = filename.endswith(".csv") or ct == "text/csv"
-
-    if not is_excel and not is_csv and ct not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(status_code=415, detail="Only CSV and Excel files are supported")
-
-    content = await file.read()
-    if len(content) > settings.max_upload_size:
-        raise HTTPException(status_code=413, detail="File too large")
-
+    rows, _ = await _read_catalog(file)
     try:
-        rows = _parse_excel(content) if is_excel else _parse_csv(content)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    rows = _rows_to_items(rows)
-    if not rows:
-        raise HTTPException(status_code=422, detail="No valid rows found after deduplication")
+        assignments = json.loads(image_assignments)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(422, "图片分配数据格式不正确。") from exc
+    if not isinstance(assignments, dict) or any(not isinstance(name, str) or not name for name in assignments.values()):
+        raise HTTPException(422, "图片分配数据格式不正确。")
 
     image_files: dict[str, tuple[bytes, str]] = {}
     for image in images:
-        filename = Path(image.filename or "").name
+        filename = _image_filename(image.filename or "")
         if not filename:
             continue
         image_content = await image.read()
@@ -160,12 +237,15 @@ async def ingest_products(
 
     missing_images: list[str] = []
     for row in rows:
-        product_id = str(row.get("product_id") or "").strip()
-        raw = str(row.get("image_url") or row.get("image_path") or "").strip()
-        is_remote = raw.startswith(("http://", "https://", "data:"))
-        is_uploaded = bool(raw) and Path(raw).name.lower() in image_files
-        if not is_remote and not is_uploaded:
-            missing_images.append(f"{product_id}: {raw or '未填写图片文件名'}")
+        reference = _image_reference(row)
+        assigned = assignments.get(reference.product_id)
+        if assigned is None and reference.has_image_url:
+            continue
+        name = assigned.lower() if assigned is not None else reference.image_name
+        if name in image_files:
+            row.update(image_url="", image_path=name)
+        else:
+            missing_images.append(f"{reference.product_id}（{reference.image_ref or '未填写图片文件名'}）")
     if missing_images:
         preview = "；".join(missing_images[:10])
         suffix = f"；另有 {len(missing_images) - 10} 条" if len(missing_images) > 10 else ""

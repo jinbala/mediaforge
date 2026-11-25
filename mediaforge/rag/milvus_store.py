@@ -175,6 +175,15 @@ class MilvusVectorStore(VectorStore):
 
         await loop.run_in_executor(None, lambda: client.upsert(collection_name=self.collection, data=data))
 
+    async def delete(self, document_id: str) -> None:
+        await self._init()
+        await asyncio.to_thread(
+            self._client.delete,
+            collection_name=self.collection,
+            ids=[document_id],
+            timeout=10,
+        )
+
     async def get_by_product_id(
         self, product_id: str, tenant_id: str = ""
     ) -> RagResult | None:
@@ -200,6 +209,7 @@ class MilvusVectorStore(VectorStore):
                     "market", "quality_status", "search_text",
                 ],
                 limit=10,
+                consistency_level="Strong",
             ),
         )
         if not rows:
@@ -282,6 +292,7 @@ class MilvusVectorStore(VectorStore):
                     reqs=reqs,
                     ranker=RRFRanker(k=60),
                     limit=top_k,
+                    consistency_level="Strong",
                     output_fields=[
                         "document_id", "product_id", "tenant_id", "visibility",
                         "source_type", "category", "image_url", "style", "color",

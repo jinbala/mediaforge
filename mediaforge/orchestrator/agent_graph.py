@@ -149,7 +149,11 @@ async def build_supervisor_graph(
         from langchain_openai import ChatOpenAI
 
         fallback_models = None
-        if settings.agent_fallback_model and settings.agent_fallback_model != settings.agent_model:
+        if (
+            settings.openrouter_api_format == "openrouter"
+            and settings.agent_fallback_model
+            and settings.agent_fallback_model != settings.agent_model
+        ):
             fallback_models = [settings.agent_model, settings.agent_fallback_model]
         llm = ChatOpenAI(
             model=settings.agent_model,
@@ -157,7 +161,9 @@ async def build_supervisor_graph(
             base_url=settings.openrouter_base_url,
             openai_proxy=settings.http_proxy or None,
             max_tokens=settings.agent_max_output_tokens,
-            temperature=settings.agent_temperature,
+            temperature=(
+                settings.agent_temperature if settings.openrouter_api_format == "openrouter" else None
+            ),
             extra_body={"models": fallback_models} if fallback_models else None,
         )
 

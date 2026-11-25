@@ -8,6 +8,7 @@ mediaforge.config.clear_settings_cache()
 
 import asyncio  # noqa: E402
 from datetime import datetime  # noqa: E402
+from unittest.mock import Mock  # noqa: E402
 from uuid import UUID  # noqa: E402
 
 import pytest  # noqa: E402
@@ -15,8 +16,10 @@ import pytest_asyncio  # noqa: E402
 from fakeredis.aioredis import FakeRedis  # noqa: E402
 from fastapi import Depends, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from kombu.exceptions import OperationalError  # noqa: E402
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
+from mediaforge.db import AssetStatus  # noqa: E402
 from mediaforge.db.job_store import JobStore  # noqa: E402
 from mediaforge.db.tables import Base  # noqa: E402
 from mediaforge.gateway.dependencies import (  # noqa: E402
@@ -26,6 +29,7 @@ from mediaforge.gateway.dependencies import (  # noqa: E402
 from mediaforge.gateway.main import app  # noqa: E402
 from mediaforge.models.job import BatchSubmitPayload, SkuInput  # noqa: E402
 from mediaforge.models.tenant import Tenant, TenantPlan  # noqa: E402
+from mediaforge.orchestrator import dispatcher  # noqa: E402
 
 TENANT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 OTHER_TENANT_ID = UUID("660e8400-e29b-41d4-a716-446655440001")
@@ -79,6 +83,83 @@ async def client():
         app.dependency_overrides.clear()
         await redis.aclose()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_task_reuses_failed_skus_and_deduplicates_requests(client, monkeypatch):
+    store = client.store
+    payload = _make_payload()
+    successful = payload.skus[0]
+    failed = successful.model_copy(update={"sku_id": "SKU-002", "ref_sku_id": "REF-001"})
+    partial = successful.model_copy(update={"sku_id": "SKU-003"})
+    payload.skus.extend([failed, partial])
+    original_id = await store.create_job(str(TENANT_ID), payload)
+    await store.add_asset(
+        job_id=original_id,
+        tenant_id=str(TENANT_ID),
+        sku_id=successful.sku_id,
+        output_type="main_image",
+        model_used="openai/gpt-image-2",
+        status=AssetStatus.success,
+        file_path="https://example.com/result.png",
+    )
+    await store.complete_job_item(original_id, successful.sku_id, completed_assets=1, failed_assets=0)
+    await store.complete_job_item(original_id, failed.sku_id, completed_assets=0, failed_assets=1)
+    await store.complete_job_item(original_id, partial.sku_id, completed_assets=1, failed_assets=1)
+    original = await store.get_job(original_id)
+    original_assets = await store.get_assets_for_job(original_id)
+    publish = Mock()
+    monkeypatch.setattr(dispatcher.process_sku, "apply_async", publish)
+
+    path = f"/api/v1/tasks/{original_id}/retry"
+    first = client.post(path)
+    second = client.post(path)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json() == second.json()
+    retry_id = first.json()["job_id"]
+    assert retry_id != original_id
+    retry = await store.get_job(retry_id)
+    expected_payload = payload.model_copy(update={"skus": [failed, partial]})
+    assert retry["input_data"] == expected_payload.model_dump(mode="json")
+    assert retry["source"] == "retry"
+    assert publish.call_count == 2
+    for queued, sku in zip(publish.call_args_list, expected_payload.skus, strict=True):
+        assert queued.kwargs["args"] == [
+            retry_id,
+            str(TENANT_ID),
+            sku.model_dump(mode="json"),
+            payload.image_model.value,
+            payload.video_model.value,
+        ]
+        assert queued.kwargs["queue"] == payload.priority
+    assert await store.get_job(original_id) == original
+    assert await store.get_assets_for_job(original_id) == original_assets
+
+
+@pytest.mark.asyncio
+async def test_retry_task_can_recover_after_queue_publish_failure(client, monkeypatch):
+    store = client.store
+    payload = _make_payload()
+    sku_id = payload.skus[0].sku_id
+    original_id = await store.create_job(str(TENANT_ID), payload)
+    await store.complete_job_item(original_id, sku_id, completed_assets=0, failed_assets=1)
+    publish = Mock(side_effect=OperationalError("Queue unavailable"))
+    monkeypatch.setattr(dispatcher.process_sku, "apply_async", publish)
+
+    first = client.post(f"/api/v1/tasks/{original_id}/retry")
+    assert first.status_code == 202
+    retry_id = first.json()["job_id"]
+    retry = await store.get_job(retry_id)
+    assert retry["status"] == "failed"
+    assert retry["done_skus"] == 1
+    assert not await store.start_job_item(retry_id, sku_id)
+
+    publish.side_effect = None
+    second = client.post(f"/api/v1/tasks/{retry_id}/retry")
+    assert second.status_code == 202
+    assert second.json()["job_id"] != retry_id
+    assert publish.call_count == 2
 
 
 @pytest.mark.asyncio

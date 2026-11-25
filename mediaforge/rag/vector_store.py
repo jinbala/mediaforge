@@ -8,6 +8,9 @@ class VectorStore(ABC):
     async def upsert(self, items: list[RagItem]) -> None: ...
 
     @abstractmethod
+    async def delete(self, document_id: str) -> None: ...
+
+    @abstractmethod
     async def get_by_product_id(
         self, product_id: str, tenant_id: str = ""
     ) -> RagResult | None: ...

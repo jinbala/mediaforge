@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-14-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.2+-1C3C3C)](https://langchain-ai.github.io/langgraph/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -108,7 +108,8 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    Web["Next.js 14 Web"] -->|HTTP / SSE| API["FastAPI API"]
+    Web["Next.js 16 Web"] -->|HTTP / SSE| API["FastAPI API"]
+    Web -->|本机商品预览与登录| Browser["TypeScript 商品浏览器助手"]
     API --> PG["PostgreSQL"]
     API --> Redis["Redis"]
     API --> MinIO["MinIO"]
@@ -126,9 +127,10 @@ flowchart TB
 
 | 层级 | 技术 |
 | --- | --- |
-| 前端 | Next.js 14、React 18、TypeScript、Tailwind CSS、shadcn/ui、Zustand |
-| API | FastAPI、Pydantic v2、SQLAlchemy 2.0 Async |
-| 工作流 | LangGraph、LangChain、Celery |
+| 前端 | TypeScript、Next.js 16、React 19、Tailwind CSS、shadcn/ui、Zustand |
+| 商品浏览器助手 | TypeScript、Node.js、Playwright，与前端共用 npm 依赖 |
+| API | Python、FastAPI、Pydantic v2、SQLAlchemy 2.0 Async |
+| 工作流 | Python、LangGraph、LangChain、Celery |
 | 数据库 | PostgreSQL 16、Alembic |
 | 缓存与队列 | Redis 7 |
 | 向量检索 | Milvus / Zilliz Cloud |
@@ -331,6 +333,12 @@ npm run dev
 
 ## 导入爆款商品数据
 
+在 Windows 上导入拼多多、抖音商城或 17 网链接时，可以用本机商品浏览器助手读取需要登录的商品主图。安装 Node.js 20.9+ 和 Microsoft Edge 后，在项目根目录启动助手：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-zwd-login.ps1
+```
+
 商品库页面提供 CSV 和 Excel 模板。也可以通过脚本导入：
 
 ```bash
@@ -381,7 +389,7 @@ mediaforge/
 │   ├── orchestrator/         # LangGraph、Celery 调度与助手工具
 │   ├── rag/                  # Embedding、Milvus、混合检索与导入
 │   └── workers/              # 图片、视频、合规与模型客户端
-├── frontend/                 # Next.js Web 应用
+├── frontend/                 # TypeScript 网页和商品浏览器助手
 ├── alembic/                  # 数据库迁移
 ├── scripts/                  # 初始化、用户和商品数据脚本
 ├── data/                     # 示例商品表格

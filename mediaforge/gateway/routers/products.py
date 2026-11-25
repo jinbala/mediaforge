@@ -1,14 +1,18 @@
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 
 from mediaforge.db.engine import get_engine
+from mediaforge.db.redis_client import get_redis
 from mediaforge.db.tables import ProductTable
 from mediaforge.gateway.dependencies import get_tenant_only
 from mediaforge.models.tenant import Tenant
+from mediaforge.rag.cached_retriever import invalidate_tenant_rag_cache
+from mediaforge.rag.factory import get_vector_store
 
 router = APIRouter(prefix="/api/v1/products")
 
@@ -71,7 +75,7 @@ async def list_products(
     style: str | None = Query(default=None, max_length=100),
     color: str | None = Query(default=None, max_length=100),
     index_status: str | None = Query(default=None, pattern="^(indexed|indexing|pending|failed)$"),
-    sort: str = Query(default="updated_desc", pattern="^(updated_desc|sales_desc)$"),
+    sort: str = Query(default="updated_desc", pattern="^(created_desc|updated_desc|sales_desc)$"),
     page: int = Query(default=1, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
     tenant: Tenant = Depends(get_tenant_only),
@@ -105,11 +109,12 @@ async def list_products(
         condition = and_(condition, table.c.index_status == index_status)
 
     effective_page_size = page_size or limit
-    order_by = (
-        table.c.sales_count.desc()
-        if sort == "sales_desc"
-        else table.c.updated_at.desc()
-    )
+    if sort == "created_desc":
+        order_by = (table.c.created_at.desc().nulls_last(), table.c.document_id)
+    elif sort == "sales_desc":
+        order_by = (table.c.sales_count.desc(),)
+    else:
+        order_by = (table.c.updated_at.desc(),)
 
     async with get_engine().connect() as connection:
         total = int(
@@ -122,7 +127,7 @@ async def list_products(
         result = await connection.execute(
             select(table)
             .where(condition)
-            .order_by(order_by)
+            .order_by(*order_by)
             .limit(effective_page_size)
             .offset((page - 1) * effective_page_size)
         )
@@ -197,3 +202,34 @@ async def product_summary(
             )
         ).mappings().one()
     return ProductSummaryResponse(**dict(row))
+
+
+@router.delete("/{document_id:path}", status_code=204)
+async def delete_product(
+    document_id: str,
+    tenant: Tenant = Depends(get_tenant_only),
+) -> None:
+    table = ProductTable.__table__
+    owned = and_(
+        table.c.document_id == document_id,
+        table.c.tenant_id == tenant.tenant_id,
+        table.c.visibility == "private",
+    )
+    async with get_engine().begin() as connection:
+        index_status = (
+            await connection.execute(
+                select(table.c.index_status).where(owned).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if index_status is None:
+            raise HTTPException(404, "找不到可删除的企业商品。")
+        if index_status in {"pending", "indexing"}:
+            raise HTTPException(409, "该商品正在建立索引，请稍后再删除。")
+
+        try:
+            await get_vector_store().delete(document_id)
+            await invalidate_tenant_rag_cache(await get_redis(), str(tenant.tenant_id))
+        except Exception as exc:
+            logger.exception("Failed to remove product {} from search", document_id)
+            raise HTTPException(503, "商品搜索索引暂时无法清理，请稍后重试。") from exc
+        await connection.execute(table.delete().where(owned))
