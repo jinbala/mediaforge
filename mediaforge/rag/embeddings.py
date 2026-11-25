@@ -50,7 +50,7 @@ def _bytes_to_data_uri(raw: bytes, max_px: int = 1024) -> str:
 class DashScopeEmbeddingClient:
     def __init__(self, api_key: str | None = None):
         settings = get_settings()
-        self.api_key = api_key or settings.dashscope_api_key or settings.openrouter_api_key
+        self.api_key = (api_key or settings.dashscope_api_key).strip()
         self.text_model = settings.dashscope_text_model
         self.image_model = settings.dashscope_image_model
         self.image_dim = settings.dashscope_image_dim
@@ -86,6 +86,8 @@ class DashScopeEmbeddingClient:
         return self._text_embedder
 
     async def embed_text(self, text: str) -> list[float]:
+        if not self.api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY is not configured")
         emb = self._text_emb()
         return await emb.aembed_query(text)
 
@@ -95,7 +97,9 @@ class DashScopeEmbeddingClient:
         Args:
             image_path: Local file path or public URL.
         """
-        # Determine if it's a URL or local file
+        if not self.api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY is not configured")
+
         image_input = await self._normalize_image_input(image_path)
 
         payload = {
@@ -156,7 +160,7 @@ class DashScopeEmbeddingClient:
         Returns:
             Candidates sorted by relevance, with "rerank_score" added.
         """
-        if not candidates:
+        if not candidates or not self.api_key:
             return candidates
 
         # Build documents list

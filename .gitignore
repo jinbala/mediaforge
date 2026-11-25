@@ -55,6 +55,7 @@ tmp/
 
 # Frontend
 frontend/node_modules/
+scripts/zwd-login/node_modules/
 frontend/.next/
 frontend/dist/
 frontend/out/

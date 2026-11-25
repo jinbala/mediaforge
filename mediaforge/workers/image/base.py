@@ -608,7 +608,7 @@ class BaseImageWorker(ABC):
         # Its concrete pixel dimensions are selected by the provider and aspect ratio.
         expected_min = (
             768
-            if model_name == "openai/gpt-image-2"
+            if model_name.removeprefix("openai/") == "gpt-image-2"
             else {"1K": 768, "2K": 1536, "4K": 3000}.get(image_size, 768)
         )
         with Image.open(io.BytesIO(image_bytes)) as image:

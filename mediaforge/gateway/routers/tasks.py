@@ -1,9 +1,11 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import func, or_, select
 
@@ -11,9 +13,13 @@ from mediaforge.db.engine import get_engine
 from mediaforge.db.job_store import JobStore
 from mediaforge.db.tables import AssetTable, JobItemTable, JobTable, ProductTable
 from mediaforge.gateway.dependencies import get_job_store, get_redis_client, get_tenant_only
+from mediaforge.models.job import BatchSubmitPayload
 from mediaforge.models.tenant import Tenant
+from mediaforge.orchestrator.dispatcher import dispatch_generation_job
 
 router = APIRouter(prefix="/api/v1/tasks")
+_RETRYABLE_STATUSES = {"failed", "partial_fail"}
+_TERMINAL_STATUSES = {"done", *_RETRYABLE_STATUSES}
 
 
 @router.get("")
@@ -254,6 +260,55 @@ async def get_task(
     }
 
 
+@router.post("/{job_id}/retry", status_code=202)
+async def retry_task(
+    job_id: UUID,
+    tenant: Tenant = Depends(get_tenant_only),
+    store: JobStore = Depends(get_job_store),
+):
+    original_id = str(job_id)
+    try:
+        job = await store.get_job(original_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    if str(job["tenant_id"]) != str(tenant.tenant_id):
+        raise HTTPException(status_code=403, detail="无权操作该任务")
+    if job["status"] not in _RETRYABLE_STATUSES:
+        raise HTTPException(status_code=409, detail="只有失败或部分失败的任务可以重试")
+
+    try:
+        payload = BatchSubmitPayload.model_validate(job.get("input_data"))
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail="原任务的提交配置已无法使用") from exc
+
+    items = await store.get_job_items(original_id)
+    if items:
+        failed_ids = {item["sku_id"] for item in items if item["status"] in _RETRYABLE_STATUSES}
+    elif job["status"] == "failed":
+        failed_ids = {sku.sku_id for sku in payload.skus}
+    else:
+        # Older batches stored outcomes only as assets.
+        assets = await store.get_assets_for_job(original_id)
+        successful_ids = {asset["sku_id"] for asset in assets if asset["status"] == "success"}
+        failed_ids = {asset["sku_id"] for asset in assets if asset["status"] == "failed"}
+        failed_ids.update(sku.sku_id for sku in payload.skus if sku.sku_id not in successful_ids)
+
+    skus = [sku for sku in payload.skus if sku.sku_id in failed_ids]
+    if not skus:
+        raise HTTPException(status_code=409, detail="任务中没有可重试的商品")
+    try:
+        retry_id = await dispatch_generation_job(
+            tenant,
+            payload.model_copy(update={"skus": skus}),
+            store,
+            idempotency_key=f"retry:{original_id}",
+            source="retry",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"job_id": retry_id}
+
+
 @router.get("/{job_id}/stream")
 async def stream_task(
     job_id: str,
@@ -292,9 +347,6 @@ async def stream_task(
             await pubsub.aclose()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-_TERMINAL_STATUSES = {"done", "failed", "partial_fail"}
 
 
 @router.delete("/failed")

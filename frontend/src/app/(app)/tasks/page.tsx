@@ -7,7 +7,7 @@ import { Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 
 import { api, ApiError } from '@/lib/api'
 import { Loading } from '@/components/Loading'
-import { JobTable } from '@/components/JobTable'
+import { JobRetryButton, JobTable } from '@/components/JobTable'
 import { AssetGallery } from '@/components/AssetGallery'
 import { SkuInputList } from '@/components/SkuInputList'
 import { Button } from '@/components/ui/button'
@@ -123,6 +123,7 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
             <RefreshCw className="mr-2 h-4 w-4" />
             刷新
           </Button>
+          <JobRetryButton key={job.job_id} jobId={job.job_id} status={job.status} />
           {TERMINAL_STATUSES.includes(job.status) && (
             <Button asChild size="sm">
               <Link href={`/batch?reuseJobId=${job.job_id}`}><RotateCcw className="mr-2 h-4 w-4" />沿用配置再次生成</Link>
@@ -316,8 +317,8 @@ function TasksView() {
 
   return (
     <div className="space-y-8">
-      {jobId && <TaskDetail jobId={jobId} onBack={clearJob} />}
-      <TaskList />
+      {jobId && <TaskDetail key={jobId} jobId={jobId} onBack={clearJob} />}
+      <TaskList key={jobId ?? 'list'} />
     </div>
   )
 }

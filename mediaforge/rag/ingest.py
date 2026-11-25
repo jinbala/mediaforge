@@ -111,6 +111,7 @@ async def embed_and_upsert(
     Returns the number of items upserted.
     """
     embed_client = DashScopeEmbeddingClient()
+    require_embeddings = require_image and bool(embed_client.api_key)
     vector_store = get_vector_store()
     visibility = visibility or ("private" if tenant_id else "global")
     source_type = source_type or ("user_upload" if tenant_id else "local_seed")
@@ -192,9 +193,9 @@ async def embed_and_upsert(
             errors: list[str] = []
             if require_image and not img_url:
                 errors.append(image_error or "图片未成功保存到 MinIO")
-            if require_image and img_emb is None:
+            if require_embeddings and img_emb is None:
                 errors.append("图片向量生成失败")
-            if require_image and text_emb is None:
+            if require_embeddings and text_emb is None:
                 errors.append("文本向量生成失败")
             if not errors:
                 items.append(

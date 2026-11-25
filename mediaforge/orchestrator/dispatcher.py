@@ -1,3 +1,6 @@
+from kombu.exceptions import OperationalError
+from loguru import logger
+
 from mediaforge.auth.tenant import TenantResolver
 from mediaforge.db.engine import get_engine
 from mediaforge.db.job_store import JobStore
@@ -55,15 +58,21 @@ async def dispatch_generation_job(
     await store.start_job(job_id)
     queue = payload.priority
     for sku in payload.skus:
-        process_sku.apply_async(
-            args=[
-                job_id,
-                tenant_id,
-                sku.model_dump(mode="json"),
-                payload.image_model.value,
-                payload.video_model.value,
-            ],
-            queue=queue,
-            routing_key=queue,
-        )
+        try:
+            process_sku.apply_async(
+                args=[
+                    job_id,
+                    tenant_id,
+                    sku.model_dump(mode="json"),
+                    payload.image_model.value,
+                    payload.video_model.value,
+                ],
+                queue=queue,
+                routing_key=queue,
+            )
+        except OperationalError:
+            if source != "retry":
+                raise
+            logger.exception("Unable to queue retry job {} SKU {}", job_id, sku.sku_id)
+            await store.fail_unqueued_job_item(job_id, sku.sku_id)
     return job_id

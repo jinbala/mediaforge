@@ -2,11 +2,13 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { Trash2 } from 'lucide-react'
+import { useRouter } from 'next/navigation'
+import { Loader2, RotateCcw, Trash2 } from 'lucide-react'
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { api, ApiError } from '@/lib/api'
 import type { JobStatus } from '@/types/job'
 
 export type JobSummary = {
@@ -39,6 +41,42 @@ const TERMINAL: ReadonlySet<JobStatus> = new Set<JobStatus>([
   'partial_fail',
 ])
 
+export function JobRetryButton({ jobId, status, disabled }: {
+  jobId: string
+  status: string
+  disabled?: boolean
+}) {
+  const router = useRouter()
+  const [isRetrying, setIsRetrying] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (status !== 'failed' && status !== 'partial_fail') return null
+
+  const retry = async () => {
+    setIsRetrying(true)
+    setError(null)
+    try {
+      const job = await api.post<{ job_id: string }>(`/v1/tasks/${jobId}/retry`, {})
+      router.push(`/tasks?jobId=${job.job_id}`)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return
+      setError(err instanceof Error ? err.message : '重试提交失败')
+    } finally {
+      setIsRetrying(false)
+    }
+  }
+
+  return (
+    <div className="space-y-1">
+      <Button type="button" variant="outline" size="sm" onClick={retry} disabled={disabled || isRetrying}>
+        {isRetrying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
+        {isRetrying ? '提交中' : '重试'}
+      </Button>
+      {error && <p role="alert" className="max-w-60 text-xs text-destructive">{error}</p>}
+    </div>
+  )
+}
+
 export function JobTable({
   jobs,
   onDelete,
@@ -69,7 +107,7 @@ export function JobTable({
           <TableHead>状态</TableHead>
           <TableHead>进度</TableHead>
           <TableHead>创建时间</TableHead>
-          {onDelete && <TableHead className="w-[60px]"></TableHead>}
+          <TableHead className="w-36 text-right">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -95,9 +133,10 @@ export function JobTable({
                 {job.done_skus}/{job.total_skus} SKUs
               </TableCell>
               <TableCell>{job.created_at ? new Date(job.created_at).toLocaleString() : '—'}</TableCell>
-              {onDelete && (
-                <TableCell>
-                  {canDelete && (
+              <TableCell>
+                <div className="flex items-start justify-end gap-2">
+                  <JobRetryButton jobId={job.job_id} status={status} disabled={deletingId === job.job_id} />
+                  {onDelete && canDelete && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -105,12 +144,13 @@ export function JobTable({
                       onClick={(e) => handleDelete(e, job.job_id)}
                       disabled={deletingId === job.job_id}
                       title="删除任务"
+                      aria-label="删除任务"
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   )}
-                </TableCell>
-              )}
+                </div>
+              </TableCell>
             </TableRow>
           )
         })}

@@ -178,6 +178,8 @@ class OpenRouterClient:
         s = get_settings()
         self.api_key = api_key or s.openrouter_api_key
         self.base_url = (base_url or s.openrouter_base_url).rstrip("/")
+        self.image_base_url = (s.openrouter_image_base_url or self.base_url).rstrip("/")
+        self.api_format = s.openrouter_api_format
 
     def _headers(self) -> dict:
         s = get_settings()
@@ -203,9 +205,11 @@ class OpenRouterClient:
         payload = {
             "model": model or s.agent_model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
         }
+        if self.api_format == "openai":
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload.update(max_tokens=max_tokens, temperature=temperature)
         client = await self._get_client()
         data = await _retry_request(
             client,
@@ -239,10 +243,24 @@ class OpenRouterClient:
         image generation. Its explicit proxy is isolated from the process and
         therefore cannot affect MinIO, PostgreSQL, Redis, or internal HTTP.
         """
+        settings = get_settings()
+        if self.api_format == "openai":
+            from langchain_openai import ChatOpenAI
+
+            llm = ChatOpenAI(
+                model=model or settings.quality_model,
+                api_key=self.api_key,
+                base_url=self.base_url,
+                http_async_client=await self._get_client(),
+                max_completion_tokens=max_tokens,
+                max_retries=0,
+            )
+            structured_llm = llm.with_structured_output(schema, method="json_schema", strict=True)
+            return await structured_llm.ainvoke(messages)
+
         import openrouter
         from langchain_openrouter import ChatOpenRouter
 
-        settings = get_settings()
         sync_client = httpx.Client(
             timeout=180.0,
             proxy=settings.http_proxy or None,
@@ -379,7 +397,7 @@ class OpenRouterClient:
         }
         if references:
             payload["input_references"] = references
-        if full_model == "openai/gpt-image-2":
+        if self.api_format == "openai" or full_model == "openai/gpt-image-2":
             payload["quality"] = {"1K": "low", "2K": "medium", "4K": "high"}.get(
                 size, "medium"
             )
@@ -408,13 +426,72 @@ class OpenRouterClient:
                 prompt, model, size, aspect_ratio, product_image_path, ref_image_path
             )
             client = await self._get_client()
+            if self.api_format == "openai":
+                return await self._request_openai_image(client, payload)
             data = await _retry_request(
-                client,
-                f"{self.base_url}/images",
-                self._headers(),
-                payload,
+                client, f"{self.image_base_url}/images", self._headers(), payload
             )
         return self._extract_image_bytes(data)
+
+    async def _request_openai_image(self, client: httpx.AsyncClient, payload: dict) -> bytes:
+        headers = self._headers()
+        del headers["Content-Type"]
+        width, height = (int(part) for part in payload["aspect_ratio"].split(":"))
+        provider_width, provider_height = min(width, 3 * height), min(height, 3 * width)
+        needs_crop = (provider_width, provider_height) != (width, height)
+        scale = 1024 / min(provider_width, provider_height)
+        prompt = payload["prompt"]
+        if needs_crop:
+            axis = "height" if width > height else "width"
+            prompt += f"\n\nKeep the entire product and key details inside the central 70% of the {axis}; leave room for cropping."
+        fields = {
+            "model": payload["model"],
+            "prompt": prompt,
+            "n": payload["n"],
+            "size": f"{round(provider_width * scale / 16) * 16}x{round(provider_height * scale / 16) * 16}",
+            "quality": payload["quality"],
+        }
+        references = payload.get("input_references", [])
+        if references:
+            files = [
+                (
+                    "image[]",
+                    (
+                        f"reference-{number}.jpg",
+                        base64.b64decode(reference["image_url"]["url"].split(",", 1)[1]),
+                        "image/jpeg",
+                    ),
+                )
+                for number, reference in enumerate(references, 1)
+            ]
+            response = await client.post(
+                f"{self.image_base_url}/images/edits", headers=headers, data=fields, files=files
+            )
+        else:
+            response = await client.post(
+                f"{self.image_base_url}/images/generations", headers=headers, json=fields
+            )
+        if response.status_code == 524:
+            raise httpx.HTTPStatusError(
+                "出图网关超时（HTTP 524）。本次出图和计费结果未知，请先查看中转用量，再按需重试。",
+                request=response.request,
+                response=response,
+            )
+        response.raise_for_status()
+        image_bytes = self._extract_image_bytes(response.json())
+        if not needs_crop:
+            return image_bytes
+
+        import io
+
+        from PIL import Image, ImageOps
+
+        output = io.BytesIO()
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            crop_scale = min(image.width // width, image.height // height)
+            cropped = ImageOps.fit(image, (width * crop_scale, height * crop_scale))
+            cropped.save(output, format=image.format)
+        return output.getvalue()
 
     @staticmethod
     def _extract_image_bytes(data: dict) -> bytes:

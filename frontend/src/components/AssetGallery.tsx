@@ -1,3 +1,6 @@
+'use client'
+
+import { useState } from 'react'
 import { AlertCircle, Download, ExternalLink, Image as ImageIcon, Video as VideoIcon } from 'lucide-react'
 
 import { Card, CardContent } from '@/components/ui/card'
@@ -10,6 +13,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { api } from '@/lib/api'
+import { assetApiPath, assetPreviewHref } from '@/lib/asset-file'
 import type { Asset, AssetStatus } from '@/types/job'
 
 const STATUS_LABEL: Record<AssetStatus, string> = {
@@ -24,12 +29,6 @@ const STATUS_VARIANT: Record<AssetStatus, 'outline' | 'destructive' | 'secondary
   failed: 'destructive',
   retrying: 'secondary',
   pending: 'secondary',
-}
-
-function assetUrl(filePath: string): string {
-  if (filePath.startsWith('http://') || filePath.startsWith('https://')) return filePath
-  if (filePath.startsWith('/')) return filePath
-  return filePath
 }
 
 const OUTPUT_TYPE_LABEL: Record<string, string> = {
@@ -74,8 +73,30 @@ export function AssetGallery({ assets }: { assets: Asset[] }) {
 
 function AssetCard({ asset }: { asset: Asset }) {
   const isVideo = asset.output_type === 'video'
-  const hasFile = !!asset.file_path
-  const url = hasFile ? assetUrl(asset.file_path!) : null
+  const url = asset.file_path
+  const hasFile = !!url
+  const apiPath = url ? assetApiPath(url) : null
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState(false)
+
+  const download = async () => {
+    if (!apiPath) return
+    setDownloading(true)
+    setDownloadError(false)
+    try {
+      const blob = await api.getFile(apiPath)
+      const href = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = href
+      link.download = apiPath.split('/').pop() || 'mediaforge-asset'
+      link.click()
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000)
+    } catch {
+      setDownloadError(true)
+    } finally {
+      setDownloading(false)
+    }
+  }
 
   return (
     <Card className={`overflow-hidden transition-shadow hover:shadow-md ${asset.status === 'failed' && hasFile ? 'border-destructive/40' : ''}`}>
@@ -167,24 +188,24 @@ function AssetCard({ asset }: { asset: Asset }) {
               className="h-7 flex-1 text-xs"
               asChild
             >
-              <a href={url} target="_blank" rel="noreferrer">
+              <a href={assetPreviewHref(url)} target="_blank" rel="noreferrer">
                 <ExternalLink className="mr-1 h-3 w-3" />
                 {asset.status === 'failed' ? '查看失败图' : '打开'}
               </a>
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 flex-1 text-xs"
-              asChild
-            >
-              <a href={url} download>
+            {apiPath ? (
+              <Button variant="outline" size="sm" className="h-7 flex-1 text-xs" disabled={downloading} onClick={download}>
                 <Download className="mr-1 h-3 w-3" />
-                下载
-              </a>
-            </Button>
+                {downloading ? '下载中' : '下载'}
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" className="h-7 flex-1 text-xs" asChild>
+                <a href={url} download><Download className="mr-1 h-3 w-3" />下载</a>
+              </Button>
+            )}
           </div>
         )}
+        {downloadError && <p role="alert" className="text-xs text-destructive">下载失败，请重试</p>}
       </CardContent>
     </Card>
   )

@@ -71,7 +71,7 @@ async def list_products(
     style: str | None = Query(default=None, max_length=100),
     color: str | None = Query(default=None, max_length=100),
     index_status: str | None = Query(default=None, pattern="^(indexed|indexing|pending|failed)$"),
-    sort: str = Query(default="updated_desc", pattern="^(updated_desc|sales_desc)$"),
+    sort: str = Query(default="updated_desc", pattern="^(created_desc|updated_desc|sales_desc)$"),
     page: int = Query(default=1, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
     tenant: Tenant = Depends(get_tenant_only),
@@ -105,11 +105,12 @@ async def list_products(
         condition = and_(condition, table.c.index_status == index_status)
 
     effective_page_size = page_size or limit
-    order_by = (
-        table.c.sales_count.desc()
-        if sort == "sales_desc"
-        else table.c.updated_at.desc()
-    )
+    if sort == "created_desc":
+        order_by = (table.c.created_at.desc().nulls_last(), table.c.document_id)
+    elif sort == "sales_desc":
+        order_by = (table.c.sales_count.desc(),)
+    else:
+        order_by = (table.c.updated_at.desc(),)
 
     async with get_engine().connect() as connection:
         total = int(
@@ -122,7 +123,7 @@ async def list_products(
         result = await connection.execute(
             select(table)
             .where(condition)
-            .order_by(order_by)
+            .order_by(*order_by)
             .limit(effective_page_size)
             .offset((page - 1) * effective_page_size)
         )

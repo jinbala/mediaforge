@@ -29,7 +29,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ.setdefault("JWT_SECRET", "seed-script")
-os.environ.setdefault("OPENROUTER_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
 
 import mediaforge.config
 mediaforge.config.clear_settings_cache()
@@ -85,8 +84,8 @@ def parse_file(path: Path) -> list[dict]:
 async def seed(file_path: Path, batch_size: int, image_dir: Path | None) -> None:
     settings = get_settings()
 
-    if not settings.dashscope_api_key and not settings.openrouter_api_key:
-        log.error("DASHSCOPE_API_KEY or OPENROUTER_API_KEY must be set. Export before running.")
+    if not settings.dashscope_api_key.strip():
+        log.error("DASHSCOPE_API_KEY must be set to build the vector index.")
         sys.exit(1)
 
     image_base_dir: str | None = None

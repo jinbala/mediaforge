@@ -146,9 +146,10 @@ async function attemptRefresh(): Promise<boolean> {
   return refreshInflight
 }
 
-async function requestJson<T>(
+async function request<T>(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit,
+  read: (response: Response) => Promise<T>,
   retried = false,
 ): Promise<T> {
   const url = `${API_BASE}${path}`
@@ -169,7 +170,7 @@ async function requestJson<T>(
       if (err.code === 'token_expired' || err.code === 'missing_credentials') {
         const refreshed = await attemptRefresh()
         if (refreshed) {
-          return requestJson<T>(path, options, true)
+          return request(path, options, read, true)
         }
       }
       onUnauthorized?.()
@@ -180,14 +181,19 @@ async function requestJson<T>(
       throw await parseError(res)
     }
 
-    const contentType = res.headers.get('content-type') || ''
-    if (contentType.includes('application/json')) {
-      return (await res.json()) as T
-    }
-    return (await res.text()) as T
+    return await read(res)
   } finally {
     clear()
   }
+}
+
+function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
+  return request<T>(path, options, (response) => {
+    const contentType = response.headers.get('content-type') || ''
+    return contentType.includes('application/json')
+      ? response.json() as Promise<T>
+      : response.text() as Promise<T>
+  })
 }
 
 async function requestFormData<T>(
@@ -227,8 +233,21 @@ async function requestFormData<T>(
   }
 }
 
+export type ProductImportPreview = {
+  rows: { product_id: string; image_ref: string; has_image_url: boolean; image_name: string }[]
+  skipped: number
+}
+
+export type ProductLinkPreview = {
+  product_id: string
+  title: string
+  image_data: string
+}
+
 export const api = {
   get: <T>(path: string) => requestJson<T>(path, { method: 'GET' }),
+  getFile: (path: string, signal?: AbortSignal) =>
+    request(path, { method: 'GET', signal }, (response) => response.blob()),
   post: <T>(path: string, body: unknown) =>
     requestJson<T>(path, { method: 'POST', body: JSON.stringify(body) }),
   delete: <T>(path: string) => requestJson<T>(path, { method: 'DELETE' }),
@@ -237,10 +256,22 @@ export const api = {
     formData.append('file', file)
     return requestFormData<{ url: string }>('/v1/upload', formData, 120000)
   },
-  ingestProducts: (catalog: File, images: File[]) => {
+  previewProductImport: (catalog: File, signal: AbortSignal) => {
     const formData = new FormData()
     formData.append('file', catalog)
-    images.forEach((image) => formData.append('images', image))
+    return requestJson<ProductImportPreview>('/v1/rag/ingest/preview', {
+      method: 'POST', body: formData, signal,
+    })
+  },
+  previewProductLink: (text: string, signal: AbortSignal) =>
+    requestJson<ProductLinkPreview>('/v1/rag/ingest/link/preview', {
+      method: 'POST', body: JSON.stringify({ text }), signal,
+    }),
+  ingestProducts: (catalog: File, images: Map<File, string>, assignments: Record<string, string>) => {
+    const formData = new FormData()
+    formData.append('file', catalog)
+    for (const [image, name] of images) formData.append('images', image, name)
+    formData.append('image_assignments', JSON.stringify(assignments))
     return requestFormData<{ accepted: number; message: string }>(
       '/v1/rag/ingest',
       formData,

@@ -1,6 +1,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_image_base_url: str = ""
+    openrouter_api_format: Literal["openrouter", "openai"] = "openrouter"
     # Optional proxy used only by OpenRouter clients. It is never exported as
     # HTTP_PROXY / HTTPS_PROXY, so MinIO and internal services are unaffected.
     http_proxy: str = ""

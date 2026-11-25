@@ -36,6 +36,7 @@ const nextConfig = {
       '/agent',
       '/batch',
       '/tasks',
+      '/asset',
       '/products',
       '/settings/:path*',
     ].map((source) => ({ source, headers: noStore }))
