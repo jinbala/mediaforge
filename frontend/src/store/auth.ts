@@ -38,7 +38,7 @@ type AuthState = {
   isLoading: boolean
   error: string | null
   hasHydrated: boolean
-  login: (email: string, password: string) => Promise<void>
+  login: (account: string, password: string) => Promise<void>
   signup: (email: string, password: string, displayName?: string) => Promise<void>
   fetchMe: () => Promise<void>
   refresh: () => Promise<boolean>
@@ -70,10 +70,10 @@ export const useAuth = create<AuthState>()(
       setHasHydrated: (hasHydrated) => set({ hasHydrated }),
       clearError: () => set({ error: null }),
 
-      login: async (email, password) => {
+      login: async (account, password) => {
         set({ isLoading: true, error: null })
         try {
-          const res = await api.post<AuthResponse>('/v1/auth/login', { email, password })
+          const res = await api.post<AuthResponse>('/v1/auth/login', { email: account, password })
           applyCsrf(res.csrf_token)
           set({
             isAuthenticated: true,

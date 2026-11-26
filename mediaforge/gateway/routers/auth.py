@@ -158,10 +158,11 @@ async def login(body: UserLoginRequest, request: Request, response: Response):
     user_store = UserStore(engine)
     tenant_store = TenantStore(engine)
 
-    row = await user_store.get_by_email(body.email)
+    email = s.admin_login_email if body.email == "admin" else body.email
+    row = await user_store.get_by_email(email) if email else None
     if row is None:
         # Constant-time-ish penalty to avoid timing enumeration
-        raise HTTPException(status_code=401, detail={"code": "invalid_credentials", "msg": "Invalid email or password"})
+        raise HTTPException(status_code=401, detail={"code": "invalid_credentials", "msg": "Invalid account or password"})
 
     # Lockout check
     locked_until = row.get("locked_until")
@@ -178,12 +179,12 @@ async def login(body: UserLoginRequest, request: Request, response: Response):
         lock_until = None
         if attempts >= s.login_max_attempts:
             lock_until = now + timedelta(seconds=s.login_lockout_seconds)
-            logger.warning("Account locked: email={} until={}", body.email, lock_until)
+            logger.warning("Account locked: email={} until={}", email, lock_until)
         await user_store.record_login_failure(row["user_id"], lock_until=lock_until)
         await audit("login", success=False, user_id=row["user_id"],
                     ip_address=_client_ip(request), user_agent=_ua(request),
                     metadata={"reason": "wrong_password", "attempts": attempts})
-        raise HTTPException(status_code=401, detail={"code": "invalid_credentials", "msg": "Invalid email or password"})
+        raise HTTPException(status_code=401, detail={"code": "invalid_credentials", "msg": "Invalid account or password"})
 
     # Password rehash if rounds changed
     if needs_rehash(row["password_hash"]):

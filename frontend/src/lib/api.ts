@@ -188,7 +188,8 @@ async function request<T>(
 }
 
 function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
-  return request<T>(path, options, (response) => {
+  return request<T>(path, options, async (response) => {
+    if (response.status === 204) return undefined as T
     const contentType = response.headers.get('content-type') || ''
     return contentType.includes('application/json')
       ? response.json() as Promise<T>
@@ -242,6 +243,7 @@ export type ProductLinkPreview = {
   product_id: string
   title: string
   image_data: string
+  gallery_image_data?: string[]
 }
 
 export const api = {
@@ -250,6 +252,8 @@ export const api = {
     request(path, { method: 'GET', signal }, (response) => response.blob()),
   post: <T>(path: string, body: unknown) =>
     requestJson<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  put: <T>(path: string, body: unknown) =>
+    requestJson<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   delete: <T>(path: string) => requestJson<T>(path, { method: 'DELETE' }),
   upload: (file: File) => {
     const formData = new FormData()
@@ -267,7 +271,7 @@ export const api = {
     requestJson<ProductLinkPreview>('/v1/rag/ingest/link/preview', {
       method: 'POST', body: JSON.stringify({ text }), signal,
     }),
-  ingestProducts: (catalog: File, images: Map<File, string>, assignments: Record<string, string>) => {
+  ingestProducts: (catalog: File, images: Map<File, string>, assignments: Record<string, string | string[]>) => {
     const formData = new FormData()
     formData.append('file', catalog)
     for (const [image, name] of images) formData.append('images', image, name)

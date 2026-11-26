@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import EmailStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     # Login rate limit
     login_max_attempts: int = 5
     login_lockout_seconds: int = 15 * 60
+    admin_login_email: EmailStr | None = None
 
     # Public signup is disabled by default. Enable only for a controlled local demo.
     allow_self_signup: bool = False

@@ -56,18 +56,19 @@ type GenerationDraft = {
 }
 
 const STORAGE_KEY = 'mediaforge:generation-drafts'
+const DEFAULT_PLATFORM = 'pinduoduo'
 
 const createSku = (): Sku => ({
   sku_id: '',
   product_image_url: '',
   product_name: '',
   category: '',
-  target_platforms: 'amazon',
+  target_platforms: DEFAULT_PLATFORM,
   output_types: ['main_image'],
   style_hint: '',
   presentation_mode: 'auto',
   model_preference: 'auto',
-  market: 'US',
+  market: inferMarketFromPlatforms([DEFAULT_PLATFORM]),
   reference_mode: 'auto',
   ref_sku_id: '',
   inherits_batch_rules: false,
@@ -112,9 +113,10 @@ function toSkuInput(draft: GenerationDraft): SkuInput {
 
 export default function BatchPage() {
   const router = useRouter()
-  const { imageModels } = useModels()
+  const { imageModels, defaultImageModel } = useModels()
   const [sku, setSku] = useState<Sku>(createSku)
-  const [imageModel, setImageModel] = useState('fast')
+  const [selectedImageModel, setImageModel] = useState<string | null>(null)
+  const imageModel = selectedImageModel ?? defaultImageModel
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('auto')
   const [imageSize, setImageSize] = useState<ImageSize>('2K')
   const [priority, setPriority] = useState<Priority>('normal')
@@ -217,7 +219,7 @@ export default function BatchPage() {
 
   const resetEditor = () => {
     setSku(createSku())
-    setImageModel('fast')
+    setImageModel(null)
     setAspectRatio('auto')
     setImageSize('2K')
     setPriority('normal')

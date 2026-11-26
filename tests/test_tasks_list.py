@@ -8,7 +8,7 @@ mediaforge.config.clear_settings_cache()
 
 import asyncio  # noqa: E402
 from datetime import datetime  # noqa: E402
-from unittest.mock import Mock  # noqa: E402
+from unittest.mock import AsyncMock, Mock  # noqa: E402
 from uuid import UUID  # noqa: E402
 
 import pytest  # noqa: E402
@@ -27,9 +27,11 @@ from mediaforge.gateway.dependencies import (  # noqa: E402
     get_tenant_only,
 )
 from mediaforge.gateway.main import app  # noqa: E402
-from mediaforge.models.job import BatchSubmitPayload, SkuInput  # noqa: E402
+from mediaforge.models.job import AssetOutput, BatchSubmitPayload, GenerationContext, SkuInput  # noqa: E402
 from mediaforge.models.tenant import Tenant, TenantPlan  # noqa: E402
 from mediaforge.orchestrator import dispatcher  # noqa: E402
+from mediaforge.orchestrator import nodes, tasks as worker_tasks  # noqa: E402
+from mediaforge.workers.image.base import BaseImageWorker  # noqa: E402
 
 TENANT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 OTHER_TENANT_ID = UUID("660e8400-e29b-41d4-a716-446655440001")
@@ -163,6 +165,92 @@ async def test_retry_task_can_recover_after_queue_publish_failure(client, monkey
 
 
 @pytest.mark.asyncio
+async def test_repair_processes_only_the_selected_failed_image_in_place(client, monkeypatch):
+    store = client.store
+    payload = _make_payload()
+    sku = payload.skus[0]
+    sku.output_types.append("detail_page")
+    job_id = await store.create_job(str(TENANT_ID), payload)
+    asset_ids = {}
+    for output_type, platform, status in [
+        ("main_image", "amazon", AssetStatus.success),
+        ("detail_page", "amazon:scene", AssetStatus.success),
+        ("detail_page", "amazon:feature", AssetStatus.failed),
+        ("detail_page", "amazon:closeup", AssetStatus.failed),
+    ]:
+        asset_ids[platform] = await store.add_asset(
+            job_id=job_id, tenant_id=str(TENANT_ID), sku_id=sku.sku_id,
+            output_type=output_type, platform=platform, model_used="test",
+            status=status, file_path=f"/{platform}.png",
+        )
+    await store.complete_job_item(job_id, sku.sku_id, completed_assets=2, failed_assets=2)
+    publish = Mock()
+    monkeypatch.setattr(worker_tasks.process_sku, "apply_async", publish)
+    path = f"/api/v1/tasks/{job_id}/repair-images"
+
+    assert client.post(path, json={"asset_ids": [asset_ids["amazon"]]}).status_code == 409
+    request = {"asset_ids": [asset_ids["amazon:closeup"]], "instruction": "Focus on the seam"}
+    response = client.post(path, json=request)
+    assert response.status_code == 202, response.text
+    assert response.json() == {"queued_images": 1, "unqueued_images": 0}
+    assert client.post(path, json=request).status_code == 409
+    assert publish.call_count == 1
+    assert (await store.get_job(job_id))["status"] == "running"
+
+    monkeypatch.setattr(worker_tasks, "_get_store", AsyncMock(return_value=store))
+    monkeypatch.setattr(nodes, "get_image_provider", AsyncMock(return_value=None))
+    monkeypatch.setattr(nodes, "get_vector_store", Mock(return_value=None))
+    monkeypatch.setattr(
+        BaseImageWorker, "prepare_generation_context",
+        AsyncMock(return_value=GenerationContext(input_matches=True)),
+    )
+    calls = []
+
+    async def generate(worker, **kwargs):
+        calls.append((worker.output_type, kwargs["variant"], worker.repair_instruction))
+        return AssetOutput(
+            sku_id=sku.sku_id, output_type=worker.output_type, platform="amazon:closeup",
+            model_used="test", status="success", file_path="/repaired.png",
+        )
+
+    monkeypatch.setattr(BaseImageWorker, "_generate_and_save", generate)
+    queued = publish.call_args.kwargs["args"]
+    result = await asyncio.to_thread(worker_tasks.process_sku.run, *queued)
+    assert result["status"] == "partial_fail"
+    assert calls == [("detail_page", "closeup", "Focus on the seam")]
+    assert (await asyncio.to_thread(worker_tasks.process_sku.run, *queued))["status"] == "skipped"
+    detail = client.get(f"/api/v1/tasks/{job_id}").json()
+    assert detail["job_items"][0]["completed_assets"] == 3
+    assert detail["job_items"][0]["failed_assets"] == 1
+    assert {asset["asset_id"] for asset in detail["assets"]} >= set(asset_ids.values())
+    assert client.post(path, json=request).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_repair_queue_failure_restores_terminal_counts_and_can_be_retried(client, monkeypatch):
+    store = client.store
+    payload = _make_payload()
+    sku_id = payload.skus[0].sku_id
+    job_id = await store.create_job(str(TENANT_ID), payload)
+    asset_id = await store.add_asset(
+        job_id=job_id, tenant_id=str(TENANT_ID), sku_id=sku_id,
+        output_type="main_image", platform="amazon", model_used="test", status=AssetStatus.failed,
+    )
+    await store.complete_job_item(job_id, sku_id, completed_assets=0, failed_assets=1)
+    publish = Mock(side_effect=OperationalError("Queue unavailable"))
+    monkeypatch.setattr(worker_tasks.process_sku, "apply_async", publish)
+
+    path = f"/api/v1/tasks/{job_id}/repair-images"
+    request = {"asset_ids": [asset_id]}
+    assert client.post(path, json=request).status_code == 503
+    assert (await store.get_job(job_id))["status"] == "failed"
+    assert (await store.get_job_items(job_id))[0]["failed_assets"] == 1
+    publish.side_effect = None
+    assert client.post(path, json=request).status_code == 202
+    assert not await store.start_job_item(job_id, sku_id, repair_id="stale")
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_requires_auth():
     """No dependency overrides -> real auth gate kicks in and returns 401."""
     response = TestClient(app).get("/api/v1/tasks")
@@ -173,6 +261,9 @@ async def test_list_tasks_requires_auth():
 async def test_list_tasks_returns_jobs_for_tenant(client):
     store = client.store
     payload = _make_payload()
+    payload.skus.append(payload.skus[0].model_copy(update={
+        "sku_id": "SKU-002", "target_platforms": ["amazon", "pinduoduo"],
+    }))
     auth_job_ids = []
     for _ in range(3):
         job_id = await store.create_job(tenant_id=str(TENANT_ID), payload=payload)
@@ -195,8 +286,10 @@ async def test_list_tasks_returns_jobs_for_tenant(client):
 
     for job in jobs:
         assert job["status"] == "pending"
-        assert job["total_skus"] == 1
+        assert job["total_skus"] == 2
         assert job["done_skus"] == 0
+        assert job["platforms"] == ["amazon", "pinduoduo"]
+        assert "input_data" not in job
         assert datetime.fromisoformat(job["created_at"])
 
 

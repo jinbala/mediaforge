@@ -98,6 +98,13 @@ class BaseImageWorker(ABC):
         self.model = model
         self.vector_store = vector_store
         self._input_validation_cache: dict[str, tuple[bool, str, str]] = {}
+        self.repair_id: str | None = None
+        self.repair_platforms: set[str] | None = None
+        self.repair_instruction = ""
+
+    def includes_output(self, platform: str, variant: str | None = None) -> bool:
+        asset_platform = f"{platform}:{variant}" if variant else platform
+        return self.repair_platforms is None or asset_platform in self.repair_platforms
 
     @abstractmethod
     async def run(
@@ -1013,19 +1020,20 @@ class BaseImageWorker(ABC):
         sku_context = sku.model_dump()
         sku_context["_output_type"] = self.output_type
         sku_context["_current_platform"] = platform
+        if self.repair_instruction:
+            prompt += f"\nAdditional product image composition requirements: {self.repair_instruction}"
         compliance = checker.check(sku_context, prompt)
         if generation_mode == "strict":
             compliance.modified_prompt += (
-                " This is a corrective retry. Prioritize exact product identity, complete product "
-                "visibility, correct platform background and composition over creative variation."
+                " This is a corrective retry. Preserve exact product identity and follow the "
+                "required shot framing and platform background."
             )
             if variant == "feature":
                 compliance.modified_prompt += (
-                    " The previous result failed because it looked like a generic front-facing catalog "
-                    "portrait. Do not repeat that composition. Make a visibly different selling-point "
-                    "image: use a tighter shoulder-to-hip editorial crop, let the garment occupy most of "
-                    "the frame, and use a natural pose or hand gesture to demonstrate a source-supported "
-                    "fit, silhouette, hem, drape or construction benefit. Do not add text or callouts."
+                    " Frame one source-visible selling point, filling most of the frame with the "
+                    "relevant part of the garment. For trousers, tightly frame either the waistband "
+                    "and upper thighs or one cuff and lower leg. Keep clear copy space beside the "
+                    "feature. Do not include text, callouts or a head-to-toe pose."
                 )
             elif variant == "scene":
                 compliance.modified_prompt += (
@@ -1035,7 +1043,13 @@ class BaseImageWorker(ABC):
             elif variant == "closeup":
                 compliance.modified_prompt += (
                     " The result must be a true macro crop of one source-visible construction or material "
-                    "detail, not a full or half-body catalog image."
+                    "detail. For trousers, fill the frame with one visible seam, waistband or cuff. "
+                    "Do not include the full garment or model."
+                )
+            elif self.output_type == "pdd_white_background":
+                compliance.modified_prompt += (
+                    " Keep every corner and all four canvas edges pure white (#FFFFFF), with white "
+                    "space surrounding the entire product. No floor line, gradient, shadow or border."
                 )
         elif generation_mode == "staged":
             compliance.modified_prompt += (
@@ -1049,7 +1063,7 @@ class BaseImageWorker(ABC):
                 sku_id=sku.sku_id,
                 output_type=self.output_type,
                 model_used=self.client.model_name(self.model),
-                platform=platform,
+                platform=asset_platform,
                 status="failed",
                 error="L1 blocked",
             )
@@ -1106,7 +1120,7 @@ class BaseImageWorker(ABC):
                 uuid.uuid5(
                     uuid.NAMESPACE_URL,
                     f"mediaforge:{job_id}:{sku.sku_id}:{self.output_type}:{platform}:"
-                    f"{variant or ''}:{generation_mode}",
+                    f"{variant or ''}:{self.repair_id or generation_mode}",
                 )
             )
             saved_path = await storage.save_asset(

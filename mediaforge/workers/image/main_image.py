@@ -35,6 +35,8 @@ class MainImageWorker(BaseImageWorker):
         product_image_path = generation_context.product_image_path
 
         for platform in sku.target_platforms:
+            if not self.includes_output(platform):
+                continue
             prompt = self._build_prompt(
                 sku,
                 platform,

@@ -1,25 +1,38 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import ValidationError
+from kombu.exceptions import OperationalError
+from loguru import logger
+from pydantic import BaseModel, Field, ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import func, or_, select
 
+from mediaforge.auth.tenant import TenantResolver
 from mediaforge.db.engine import get_engine
-from mediaforge.db.job_store import JobStore
+from mediaforge.db.job_store import JobStore, current_asset_results
 from mediaforge.db.tables import AssetTable, JobItemTable, JobTable, ProductTable
 from mediaforge.gateway.dependencies import get_job_store, get_redis_client, get_tenant_only
 from mediaforge.models.job import BatchSubmitPayload
 from mediaforge.models.tenant import Tenant
 from mediaforge.orchestrator.dispatcher import dispatch_generation_job
+from mediaforge.orchestrator.tasks import process_sku
 
 router = APIRouter(prefix="/api/v1/tasks")
 _RETRYABLE_STATUSES = {"failed", "partial_fail"}
 _TERMINAL_STATUSES = {"done", *_RETRYABLE_STATUSES}
+
+
+class ImageRepairRequest(BaseModel):
+    asset_ids: list[UUID] = Field(min_length=1)
+    instruction: str = Field(default="", max_length=500)
+
+
+class TaskRetryRequest(BaseModel):
+    without_assets_only: bool = False
 
 
 @router.get("")
@@ -29,7 +42,9 @@ async def list_tasks(
     limit: int = Query(50, ge=1, le=100),
 ):
     try:
-        jobs = await store.list_jobs_for_tenant(str(tenant.tenant_id), limit=limit)
+        jobs = await store.list_jobs_for_tenant(
+            str(tenant.tenant_id), limit=limit, include_input_data=True
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid tenant ID") from exc
     return {
@@ -39,6 +54,11 @@ async def list_tasks(
                 "status": job["status"],
                 "total_skus": job["total_skus"],
                 "done_skus": job["done_skus"],
+                "platforms": list(dict.fromkeys(
+                    platform
+                    for sku in ((job.get("input_data") or {}).get("skus") or [])
+                    for platform in (sku.get("target_platforms") or [])
+                )),
                 "created_at": job["created_at"].isoformat() if job["created_at"] else None,
             }
             for job in jobs
@@ -166,9 +186,19 @@ async def task_overview(
             "platforms": first.get("target_platforms") or [],
         }
 
+    active_retry_parents = {
+        row["idempotency_key"].removeprefix("retry:")
+        for row in jobs
+        if row["source"] == "retry"
+        and (row["idempotency_key"] or "").startswith("retry:")
+        and row["status"] in ("pending", "running")
+    }
     return {
         "active_jobs": [job_summary(row) for row in jobs if str(row["status"]) in {"pending", "running"}],
-        "attention_jobs": [job_summary(row) for row in jobs if str(row["status"]) in {"failed", "partial_fail"}][:8],
+        "attention_jobs": [
+            job_summary(row) for row in jobs
+            if row["status"] in _RETRYABLE_STATUSES and str(row["job_id"]) not in active_retry_parents
+        ][:8],
         "recent_jobs": [job_summary(row) for row in jobs[:10]],
         "recent_assets": [
             {
@@ -221,6 +251,7 @@ async def get_task(
         raise HTTPException(status_code=403, detail="Forbidden")
     assets = await store.get_assets_for_job(job_id)
     job_items = await store.get_job_items(job_id)
+    legacy_retry = await store.get_job_by_idempotency(str(tenant.tenant_id), f"retry:{job_id}")
     input_data = job.get("input_data") or {}
     ref_sku_ids = {
         sku.get("ref_sku_id")
@@ -257,12 +288,79 @@ async def get_task(
         "finished_at": job["finished_at"].isoformat() if job.get("finished_at") else None,
         "assets": assets,
         "job_items": job_items,
+        "legacy_retry": (
+            {"job_id": str(legacy_retry["job_id"]), "status": legacy_retry["status"]}
+            if legacy_retry and legacy_retry["source"] == "retry" else None
+        ),
     }
+
+
+@router.post("/{job_id}/repair-images", status_code=202)
+async def repair_images(
+    job_id: UUID,
+    request: ImageRepairRequest,
+    tenant: Tenant = Depends(get_tenant_only),
+    store: JobStore = Depends(get_job_store),
+):
+    job_id_str = str(job_id)
+    tenant_id = str(tenant.tenant_id)
+    try:
+        job = await store.get_job(job_id_str)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    if str(job["tenant_id"]) != tenant_id:
+        raise HTTPException(status_code=403, detail="无权操作该任务")
+    try:
+        payload = BatchSubmitPayload.model_validate(job.get("input_data"))
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail="原任务的提交配置已无法使用") from exc
+    try:
+        TenantResolver().check_model_allowed(tenant, payload.image_model.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    skus = {sku.sku_id: sku for sku in payload.skus}
+    repair_id = str(uuid4())
+    try:
+        selected = await store.reserve_image_repair(
+            job_id_str, tenant_id, set(request.asset_ids), skus, repair_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    queued_images = 0
+    unqueued_images = 0
+    for sku_id, assets in selected.items():
+        outputs: dict[str, list[str]] = {}
+        for asset in assets:
+            outputs.setdefault(asset["output_type"], []).append(asset["platform"])
+        try:
+            process_sku.apply_async(
+                args=[
+                    job_id_str,
+                    tenant_id,
+                    skus[sku_id].model_dump(mode="json"),
+                    payload.image_model.value,
+                    payload.video_model.value,
+                    {"id": repair_id, "outputs": outputs, "instruction": request.instruction.strip()},
+                ],
+                queue=payload.priority,
+                routing_key=payload.priority,
+            )
+            queued_images += len(assets)
+        except OperationalError:
+            logger.exception("Unable to queue image repair {} SKU {}", job_id, sku_id)
+            await store.fail_unqueued_image_repair(job_id_str, sku_id, repair_id)
+            unqueued_images += len(assets)
+    if not queued_images:
+        raise HTTPException(status_code=503, detail="补生成队列暂时不可用，请重试")
+    return {"queued_images": queued_images, "unqueued_images": unqueued_images}
 
 
 @router.post("/{job_id}/retry", status_code=202)
 async def retry_task(
     job_id: UUID,
+    request: TaskRetryRequest | None = None,
     tenant: Tenant = Depends(get_tenant_only),
     store: JobStore = Depends(get_job_store),
 ):
@@ -292,6 +390,12 @@ async def retry_task(
         successful_ids = {asset["sku_id"] for asset in assets if asset["status"] == "success"}
         failed_ids = {asset["sku_id"] for asset in assets if asset["status"] == "failed"}
         failed_ids.update(sku.sku_id for sku in payload.skus if sku.sku_id not in successful_ids)
+    if request and request.without_assets_only:
+        represented = {
+            asset["sku_id"]
+            for asset in current_asset_results(await store.get_assets_for_job(original_id))
+        }
+        failed_ids.difference_update(represented)
 
     skus = [sku for sku in payload.skus if sku.sku_id in failed_ids]
     if not skus:

@@ -9,15 +9,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { api, ApiError } from '@/lib/api'
-import type { JobStatus } from '@/types/job'
-
-export type JobSummary = {
-  job_id: string
-  status: string
-  total_skus: number
-  done_skus: number
-  created_at: string | null
-}
+import { PLATFORM_OPTIONS } from '@/lib/sku-options'
+import type { Job, JobStatus } from '@/types/job'
 
 const STATUS_LABELS: Record<JobStatus, string> = {
   pending: '等待中',
@@ -41,22 +34,20 @@ const TERMINAL: ReadonlySet<JobStatus> = new Set<JobStatus>([
   'partial_fail',
 ])
 
-export function JobRetryButton({ jobId, status, disabled }: {
+export function RetryUngeneratedSkuButton({ jobId, disabled, legacy = false }: {
   jobId: string
-  status: string
   disabled?: boolean
+  legacy?: boolean
 }) {
   const router = useRouter()
   const [isRetrying, setIsRetrying] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  if (status !== 'failed' && status !== 'partial_fail') return null
-
   const retry = async () => {
     setIsRetrying(true)
     setError(null)
     try {
-      const job = await api.post<{ job_id: string }>(`/v1/tasks/${jobId}/retry`, {})
+      const job = await api.post<{ job_id: string }>(`/v1/tasks/${jobId}/retry`, { without_assets_only: !legacy })
       router.push(`/tasks?jobId=${job.job_id}`)
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return
@@ -70,7 +61,7 @@ export function JobRetryButton({ jobId, status, disabled }: {
     <div className="space-y-1">
       <Button type="button" variant="outline" size="sm" onClick={retry} disabled={disabled || isRetrying}>
         {isRetrying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
-        {isRetrying ? '提交中' : '重试'}
+        {isRetrying ? '提交中' : legacy ? '重试失败商品' : '重试未出图商品'}
       </Button>
       {error && <p role="alert" className="max-w-60 text-xs text-destructive">{error}</p>}
     </div>
@@ -81,7 +72,7 @@ export function JobTable({
   jobs,
   onDelete,
 }: {
-  jobs: JobSummary[]
+  jobs: Job[]
   onDelete?: (jobId: string) => Promise<void> | void
 }) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -104,38 +95,58 @@ export function JobTable({
       <TableHeader>
         <TableRow>
           <TableHead>任务 ID</TableHead>
+          <TableHead className="min-w-28">平台</TableHead>
           <TableHead>状态</TableHead>
-          <TableHead>进度</TableHead>
+          <TableHead>已处理 SKU</TableHead>
           <TableHead>创建时间</TableHead>
           <TableHead className="w-36 text-right">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {jobs.map((job) => {
-          const status = job.status as JobStatus
+          const { status } = job
           const canDelete = TERMINAL.has(status)
+          const hasFailures = status === 'failed' || status === 'partial_fail'
+          const detailHref = `/tasks?jobId=${job.job_id}`
+          const statusBadge = (
+            <Badge variant={STATUS_VARIANTS[status] ?? 'secondary'}>
+              {STATUS_LABELS[status] ?? status}
+            </Badge>
+          )
+          const platforms = job.platforms?.map((platform) => (
+            PLATFORM_OPTIONS.find((option) => option.value === platform)?.label ?? platform
+          ))
           return (
-            <TableRow key={job.job_id} className="cursor-pointer">
+            <TableRow key={job.job_id}>
               <TableCell>
                 <Link
-                  href={`/tasks?jobId=${job.job_id}`}
+                  href={detailHref}
                   className="font-mono text-xs text-primary hover:underline"
                 >
                   {job.job_id}
                 </Link>
               </TableCell>
-              <TableCell>
-                <Badge variant={STATUS_VARIANTS[status] ?? 'secondary'}>
-                  {STATUS_LABELS[status] ?? job.status}
-                </Badge>
+              <TableCell className="max-w-64">
+                {platforms?.join('、') || '—'}
               </TableCell>
               <TableCell>
-                {job.done_skus}/{job.total_skus} SKUs
+                {hasFailures ? (
+                  <Link href={detailHref} title="处理失败" aria-label={`${STATUS_LABELS[status]}，处理失败`} className="inline-flex rounded-full hover:opacity-85 focus-visible:outline focus-visible:outline-primary">
+                    {statusBadge}
+                  </Link>
+                ) : statusBadge}
+              </TableCell>
+              <TableCell>
+                {job.done_skus}/{job.total_skus}
               </TableCell>
               <TableCell>{job.created_at ? new Date(job.created_at).toLocaleString() : '—'}</TableCell>
               <TableCell>
                 <div className="flex items-start justify-end gap-2">
-                  <JobRetryButton jobId={job.job_id} status={status} disabled={deletingId === job.job_id} />
+                  {hasFailures && (
+                    <Button asChild variant="outline" size="sm">
+                      <Link href={detailHref}>处理失败</Link>
+                    </Button>
+                  )}
                   {onDelete && canDelete && (
                     <Button
                       variant="ghost"

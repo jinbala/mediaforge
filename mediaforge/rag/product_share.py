@@ -1,4 +1,4 @@
-"""Read product titles and covers from supported share links."""
+"""Read product titles and photos from supported share links."""
 
 import asyncio
 import base64
@@ -19,6 +19,7 @@ _PDD_HOSTS = {"mobile.yangkeduo.com", "yangkeduo.com", "p.pinduoduo.com", "mobil
 _URL = re.compile(r"https://[^\s<>「」【】（）。，！]+")
 _IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
 _MAX_COVER_BYTES = 5 * 1024 * 1024
+MAX_GALLERY_IMAGES = 10
 
 
 class ProductShareError(ValueError):
@@ -88,23 +89,32 @@ async def _read_cover(client: httpx.AsyncClient, sources: list) -> str:
     raise ProductShareError("商品主图暂时无法读取，请重新解析或上传商品图片。")
 
 
-async def _preview_zwd(host: str, path: str) -> dict[str, str]:
+async def _preview_zwd(host: str, path: str) -> dict[str, str | list[str]]:
     match = re.fullmatch(r"/item/([0-9]{1,24})/?", path)
     if not match:
         raise ProductShareError("请复制 17 网商品详情页的链接。")
     item_id = match[1]
     url = f"https://{host}/item/{item_id}"
     try:
-        async with asyncio.timeout(20), httpx.AsyncClient(timeout=6, trust_env=False, follow_redirects=False) as client:
+        async with asyncio.timeout(25), httpx.AsyncClient(timeout=6, trust_env=False, follow_redirects=False) as client:
             title, sources = await zwd.read_product(url)
-            for source in sources[:3]:
-                if not zwd.is_product_image(source):
-                    continue
+            sources = list(dict.fromkeys(source for source in sources if zwd.is_product_image(source)))
+
+            async def read_photo(source: str) -> str | None:
                 try:
-                    data = await _image_data(client, source, headers={"Referer": url})
-                    return {"product_id": f"17ZWD-{item_id}", "title": title, "image_data": data}
+                    return await _image_data(client, source, headers={"Referer": url})
                 except (httpx.HTTPError, OSError, ValueError, SyntaxError, Image.DecompressionBombError):
-                    continue
+                    return None
+
+            photos = await asyncio.gather(*(read_photo(source) for source in sources[:MAX_GALLERY_IMAGES]))
+            photos = list(dict.fromkeys(photo for photo in photos if photo))
+            if photos:
+                return {
+                    "product_id": f"17ZWD-{item_id}",
+                    "title": title,
+                    "image_data": photos[0],
+                    "gallery_image_data": photos[1:],
+                }
     except zwd.PageUnavailable as exc:
         raise ProductShareError(str(exc)) from exc
     except TimeoutError as exc:
@@ -112,7 +122,7 @@ async def _preview_zwd(host: str, path: str) -> dict[str, str]:
     raise ProductShareError("17 网主图暂时无法读取，请重试或手动补图。")
 
 
-async def preview_product_share(text: str) -> dict[str, str]:
+async def preview_product_share(text: str) -> dict[str, str | list[str]]:
     links = _URL.findall(text.replace(r"\:", ":"))
     for link in links:
         parsed = _https_url(link)

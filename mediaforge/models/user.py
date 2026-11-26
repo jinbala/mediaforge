@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -31,7 +32,7 @@ def _normalize_email(v: str) -> str:
 
 
 class UserLoginRequest(BaseModel):
-    email: EmailStr
+    email: EmailStr | Literal["admin"]
     password: str = Field(min_length=1)
 
     _normalize = field_validator("email", mode="before")(_normalize_email)

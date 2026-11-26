@@ -21,6 +21,7 @@ async def test_batch_graph_returns_assets_for_task_persistence(
     db_engine, redis_client, tmp_path, monkeypatch
 ):
     _set_required_env(monkeypatch)
+    monkeypatch.setattr("mediaforge.orchestrator.nodes.get_image_provider", AsyncMock(return_value=None))
 
     # Ensure get_settings reads the patched env values when the graph runs.
     from mediaforge.config import clear_settings_cache

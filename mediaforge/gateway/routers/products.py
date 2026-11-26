@@ -1,20 +1,24 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 
 from mediaforge.db.engine import get_engine
 from mediaforge.db.redis_client import get_redis
-from mediaforge.db.tables import ProductTable
+from mediaforge.db.tables import HiddenPublicProductTable, ProductTable
 from mediaforge.gateway.dependencies import get_tenant_only
 from mediaforge.models.tenant import Tenant
 from mediaforge.rag.cached_retriever import invalidate_tenant_rag_cache
 from mediaforge.rag.factory import get_vector_store
 
 router = APIRouter(prefix="/api/v1/products")
+ProductScope = Literal["all", "global", "private", "hidden"]
 
 
 class ProductResponse(BaseModel):
@@ -31,10 +35,12 @@ class ProductResponse(BaseModel):
     sales_count: int
     price: Decimal | None
     image_url: str
+    gallery_image_urls: list[str] = Field(default_factory=list)
     index_status: str
     index_error: str | None
     indexed_at: datetime | None
     updated_at: datetime
+    hidden: bool = False
 
 
 class ProductListResponse(BaseModel):
@@ -61,14 +67,31 @@ class ProductSummaryResponse(BaseModel):
     failed_count: int
 
 
-def _visible_products(tenant_id):
+class PublicProductVisibility(BaseModel):
+    hidden: bool
+
+
+def _product_scope(scope: ProductScope, tenant_id: UUID):
     table = ProductTable.__table__
-    return or_(table.c.visibility == "global", table.c.tenant_id == tenant_id)
+    private = and_(table.c.visibility == "private", table.c.tenant_id == tenant_id)
+    if scope == "private":
+        return private
+
+    hidden_table = HiddenPublicProductTable.__table__
+    hidden = select(hidden_table.c.document_id).where(
+        hidden_table.c.tenant_id == tenant_id,
+        hidden_table.c.document_id == table.c.document_id,
+    ).exists()
+    if scope == "hidden":
+        return and_(table.c.visibility == "global", hidden)
+
+    public = and_(table.c.visibility == "global", ~hidden)
+    return or_(public, private) if scope == "all" else public
 
 
 @router.get("", response_model=ProductListResponse)
 async def list_products(
-    scope: str = Query(default="all", pattern="^(all|global|private)$"),
+    scope: ProductScope = "all",
     limit: int = Query(default=200, ge=1, le=500),
     q: str | None = Query(default=None, max_length=100),
     category: str | None = Query(default=None, max_length=100),
@@ -81,11 +104,7 @@ async def list_products(
     tenant: Tenant = Depends(get_tenant_only),
 ) -> ProductListResponse:
     table = ProductTable.__table__
-    condition = _visible_products(tenant.tenant_id)
-    if scope == "global":
-        condition = table.c.visibility == "global"
-    elif scope == "private":
-        condition = table.c.tenant_id == tenant.tenant_id
+    condition = _product_scope(scope, tenant.tenant_id)
 
     if q and q.strip():
         pattern = f"%{q.strip()}%"
@@ -132,7 +151,7 @@ async def list_products(
             .offset((page - 1) * effective_page_size)
         )
     return ProductListResponse(
-        products=[ProductResponse(**dict(row)) for row in result.mappings()],
+        products=[ProductResponse(**dict(row), hidden=scope == "hidden") for row in result.mappings()],
         total=total,
         page=page,
         page_size=effective_page_size,
@@ -141,15 +160,11 @@ async def list_products(
 
 @router.get("/categories", response_model=ProductCategoriesResponse)
 async def product_categories(
-    scope: str = Query(default="all", pattern="^(all|global|private)$"),
+    scope: ProductScope = "all",
     tenant: Tenant = Depends(get_tenant_only),
 ) -> ProductCategoriesResponse:
     table = ProductTable.__table__
-    condition = _visible_products(tenant.tenant_id)
-    if scope == "global":
-        condition = table.c.visibility == "global"
-    elif scope == "private":
-        condition = table.c.tenant_id == tenant.tenant_id
+    condition = _product_scope(scope, tenant.tenant_id)
     async with get_engine().connect() as connection:
         result = await connection.execute(
             select(table.c.category)
@@ -162,15 +177,11 @@ async def product_categories(
 
 @router.get("/filters", response_model=ProductFiltersResponse)
 async def product_filters(
-    scope: str = Query(default="all", pattern="^(all|global|private)$"),
+    scope: ProductScope = "all",
     tenant: Tenant = Depends(get_tenant_only),
 ) -> ProductFiltersResponse:
     table = ProductTable.__table__
-    condition = _visible_products(tenant.tenant_id)
-    if scope == "global":
-        condition = table.c.visibility == "global"
-    elif scope == "private":
-        condition = table.c.tenant_id == tenant.tenant_id
+    condition = _product_scope(scope, tenant.tenant_id)
     async with get_engine().connect() as connection:
         values = {}
         for name in ("category", "style", "color"):
@@ -187,13 +198,13 @@ async def product_summary(
     tenant: Tenant = Depends(get_tenant_only),
 ) -> ProductSummaryResponse:
     table = ProductTable.__table__
-    visible = _visible_products(tenant.tenant_id)
+    visible = _product_scope("all", tenant.tenant_id)
     async with get_engine().connect() as connection:
         row = (
             await connection.execute(
                 select(
                     func.count().filter(table.c.visibility == "global").label("global_count"),
-                    func.count().filter(table.c.tenant_id == tenant.tenant_id).label("private_count"),
+                    func.count().filter(table.c.visibility == "private").label("private_count"),
                     func.count()
                     .filter(table.c.index_status.in_(["pending", "indexing"]))
                     .label("indexing_count"),
@@ -202,6 +213,32 @@ async def product_summary(
             )
         ).mappings().one()
     return ProductSummaryResponse(**dict(row))
+
+
+@router.put("/visibility/{document_id:path}", status_code=204)
+async def set_public_product_visibility(
+    document_id: str,
+    visibility: PublicProductVisibility,
+    tenant: Tenant = Depends(get_tenant_only),
+) -> None:
+    table = ProductTable.__table__
+    hidden = HiddenPublicProductTable.__table__
+    async with get_engine().begin() as connection:
+        public_id = await connection.scalar(select(table.c.document_id).where(
+            table.c.document_id == document_id, table.c.visibility == "global"
+        ))
+        if public_id is None:
+            raise HTTPException(404, "找不到该公共商品。")
+
+        if visibility.hidden:
+            await connection.execute(
+                insert(hidden).values(tenant_id=tenant.tenant_id, document_id=public_id)
+                .on_conflict_do_nothing()
+            )
+        else:
+            await connection.execute(hidden.delete().where(
+                hidden.c.tenant_id == tenant.tenant_id, hidden.c.document_id == public_id
+            ))
 
 
 @router.delete("/{document_id:path}", status_code=204)

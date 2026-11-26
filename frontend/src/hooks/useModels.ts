@@ -10,11 +10,13 @@ export type ModelOption = {
 type ModelsResponse = {
   image_models: ModelOption[]
   video_models: ModelOption[]
+  default_image_model?: string
 }
 
 type UseModelsResult = {
   imageModels: ModelOption[]
   videoModels: ModelOption[]
+  defaultImageModel: string
   loading: boolean
 }
 
@@ -32,6 +34,7 @@ const FALLBACK_VIDEO: ModelOption[] = [
 export function useModels(): UseModelsResult {
   const [imageModels, setImageModels] = useState<ModelOption[]>(FALLBACK_IMAGE)
   const [videoModels, setVideoModels] = useState<ModelOption[]>(FALLBACK_VIDEO)
+  const [defaultImageModel, setDefaultImageModel] = useState('fast')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -39,6 +42,7 @@ export function useModels(): UseModelsResult {
       .then((data) => {
         if (data.image_models?.length) setImageModels(data.image_models)
         if (data.video_models?.length) setVideoModels(data.video_models)
+        if (data.default_image_model) setDefaultImageModel(data.default_image_model)
       })
       .catch(() => {
         // keep fallback values on error
@@ -46,5 +50,5 @@ export function useModels(): UseModelsResult {
       .finally(() => setLoading(false))
   }, [])
 
-  return { imageModels, videoModels, loading }
+  return { imageModels, videoModels, defaultImageModel, loading }
 }

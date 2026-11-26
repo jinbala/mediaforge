@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
 import { assetApiPath, assetPreviewHref } from '@/lib/asset-file'
+import { assetOutputLabel } from '@/lib/task-assets'
 import type { Asset, AssetStatus } from '@/types/job'
 
 const STATUS_LABEL: Record<AssetStatus, string> = {
@@ -29,13 +30,6 @@ const STATUS_VARIANT: Record<AssetStatus, 'outline' | 'destructive' | 'secondary
   failed: 'destructive',
   retrying: 'secondary',
   pending: 'secondary',
-}
-
-const OUTPUT_TYPE_LABEL: Record<string, string> = {
-  main_image: '主图',
-  detail_page: '详情图',
-  pdd_white_background: '拼多多白底图',
-  video: '视频',
 }
 
 export function AssetGallery({ assets }: { assets: Asset[] }) {
@@ -154,7 +148,7 @@ function AssetCard({ asset }: { asset: Asset }) {
         <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
             {isVideo ? <VideoIcon className="h-3 w-3" /> : <ImageIcon className="h-3 w-3" />}
-            {OUTPUT_TYPE_LABEL[asset.output_type] ?? asset.output_type.replaceAll('_', ' ')}
+            {assetOutputLabel(asset)}
           </span>
           {asset.platform && <span className="truncate">{asset.platform}</span>}
         </div>

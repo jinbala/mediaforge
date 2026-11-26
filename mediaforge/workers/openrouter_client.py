@@ -1,11 +1,14 @@
 import asyncio
 import base64
+from dataclasses import dataclass
 from typing import Literal, TypeVar
 
 import httpx
 from loguru import logger
+from pydantic import SecretStr
 
 from mediaforge.config import get_settings
+from mediaforge.workers.provider_http import PublicProviderTransport
 
 StructuredResult = TypeVar("StructuredResult")
 
@@ -173,13 +176,29 @@ def _get_image_semaphores() -> dict[str, asyncio.Semaphore]:
     return _IMAGE_SEMAPHORES
 
 
+@dataclass(frozen=True)
+class ImageProvider:
+    base_url: str
+    api_format: str
+    model_alias: str
+    model_id: str
+    api_key: SecretStr
+
+
 class OpenRouterClient:
-    def __init__(self, api_key: str | None = None, base_url: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        *,
+        image_provider: ImageProvider | None = None,
+    ):
         s = get_settings()
         self.api_key = api_key or s.openrouter_api_key
         self.base_url = (base_url or s.openrouter_base_url).rstrip("/")
         self.image_base_url = (s.openrouter_image_base_url or self.base_url).rstrip("/")
         self.api_format = s.openrouter_api_format
+        self.image_provider = image_provider
 
     def _headers(self) -> dict:
         s = get_settings()
@@ -191,6 +210,8 @@ class OpenRouterClient:
         }
 
     def model_name(self, alias: str) -> str:
+        if self.image_provider and alias == self.image_provider.model_alias:
+            return self.image_provider.model_id
         return get_image_models().get(alias, alias)
 
     async def chat_completion(
@@ -356,7 +377,9 @@ class OpenRouterClient:
         product_image_path: str | None = None,
         ref_image_path: str | None = None,
     ) -> dict:
-        full_model = get_image_models()[model]
+        full_model = self.model_name(model)
+        provider = self.image_provider if self.image_provider and model == self.image_provider.model_alias else None
+        api_format = provider.api_format if provider else self.api_format
         references: list[dict] = []
         reference_notes: list[str] = []
         # Image 1: new product photo (if provided)
@@ -397,7 +420,7 @@ class OpenRouterClient:
         }
         if references:
             payload["input_references"] = references
-        if self.api_format == "openai" or full_model == "openai/gpt-image-2":
+        if api_format == "openai" or full_model == "openai/gpt-image-2":
             payload["quality"] = {"1K": "low", "2K": "medium", "4K": "high"}.get(
                 size, "medium"
             )
@@ -425,6 +448,8 @@ class OpenRouterClient:
             payload = await self._image_payload(
                 prompt, model, size, aspect_ratio, product_image_path, ref_image_path
             )
+            if self.image_provider and self.image_provider.model_alias == model:
+                return await self._request_custom_image(self.image_provider, payload)
             client = await self._get_client()
             if self.api_format == "openai":
                 return await self._request_openai_image(client, payload)
@@ -433,9 +458,42 @@ class OpenRouterClient:
             )
         return self._extract_image_bytes(data)
 
-    async def _request_openai_image(self, client: httpx.AsyncClient, payload: dict) -> bytes:
-        headers = self._headers()
-        del headers["Content-Type"]
+    async def _request_custom_image(self, provider: ImageProvider, payload: dict) -> bytes:
+        headers = {"Authorization": f"Bearer {provider.api_key.get_secret_value()}"}
+        try:
+            async with httpx.AsyncClient(
+                transport=PublicProviderTransport(), follow_redirects=False, trust_env=False, timeout=180.0
+            ) as client:
+                if provider.api_format == "openai":
+                    return await self._request_openai_image(
+                        client, payload, base_url=provider.base_url, headers=headers
+                    )
+                response = await client.post(f"{provider.base_url}/images", headers=headers, json=payload)
+                response.raise_for_status()
+                return await self._decode_custom_image(client, response.json())
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in (408, 504, 524):
+                message = f"图片生成服务超时（HTTP {status}），请先查看中转用量再决定是否重试"
+            elif status in (401, 403):
+                message = f"图片生成服务拒绝访问（HTTP {status}），请检查 API Key 和模型权限"
+            else:
+                message = f"图片生成服务请求失败（HTTP {status}），请检查接口地址、协议和模型 ID"
+            raise RuntimeError(message) from None
+        except httpx.TimeoutException:
+            raise RuntimeError("图片生成服务超时，请先查看中转用量再决定是否重试") from None
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError, TypeError, AttributeError, KeyError):
+            raise RuntimeError("无法读取图片生成服务结果，请检查接口地址、模型和返回格式") from None
+
+    async def _request_openai_image(
+        self, client: httpx.AsyncClient, payload: dict, *,
+        base_url: str | None = None, headers: dict | None = None,
+    ) -> bytes:
+        custom = base_url is not None
+        base_url = base_url or self.image_base_url
+        if headers is None:
+            headers = self._headers()
+            del headers["Content-Type"]
         width, height = (int(part) for part in payload["aspect_ratio"].split(":"))
         provider_width, provider_height = min(width, 3 * height), min(height, 3 * width)
         needs_crop = (provider_width, provider_height) != (width, height)
@@ -465,11 +523,11 @@ class OpenRouterClient:
                 for number, reference in enumerate(references, 1)
             ]
             response = await client.post(
-                f"{self.image_base_url}/images/edits", headers=headers, data=fields, files=files
+                f"{base_url}/images/edits", headers=headers, data=fields, files=files
             )
         else:
             response = await client.post(
-                f"{self.image_base_url}/images/generations", headers=headers, json=fields
+                f"{base_url}/images/generations", headers=headers, json=fields
             )
         if response.status_code == 524:
             raise httpx.HTTPStatusError(
@@ -478,7 +536,8 @@ class OpenRouterClient:
                 response=response,
             )
         response.raise_for_status()
-        image_bytes = self._extract_image_bytes(response.json())
+        data = response.json()
+        image_bytes = await self._decode_custom_image(client, data) if custom else self._extract_image_bytes(data)
         if not needs_crop:
             return image_bytes
 
@@ -492,6 +551,24 @@ class OpenRouterClient:
             cropped = ImageOps.fit(image, (width * crop_scale, height * crop_scale))
             cropped.save(output, format=image.format)
         return output.getvalue()
+
+    @staticmethod
+    async def _decode_custom_image(client: httpx.AsyncClient, data: dict) -> bytes:
+        try:
+            return OpenRouterClient._extract_image_bytes(data)
+        except ValueError:
+            url = next((item.get("url") for item in data.get("data") or [] if item.get("url")), None)
+            if url is None:
+                raise
+        # Image URLs may be signed and belong to a separate CDN. Send no API key.
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            image = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(image) + len(chunk) > 32 * 1024 * 1024:
+                    raise ValueError("Image response exceeds the size limit")
+                image.extend(chunk)
+        return bytes(image)
 
     @staticmethod
     def _extract_image_bytes(data: dict) -> bytes:

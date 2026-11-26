@@ -122,13 +122,24 @@ export default function DashboardPage() {
       {error && <div className="flex items-center justify-between rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"><span>{error}</span><Button size="sm" variant="ghost" onClick={() => void load()}><RefreshCw className="h-4 w-4" /></Button></div>}
 
       {overview.attention_jobs.length > 0 && (
-        <section className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-4 sm:flex-row sm:items-center">
+        <section className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-4">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-amber-500"><AlertTriangle className="h-5 w-5" /></div>
           <div className="min-w-0 flex-1">
-            <p className="font-medium">有 {overview.attention_jobs.length} 个任务需要处理</p>
-            <p className="truncate text-sm text-muted-foreground">{overview.attention_jobs.slice(0, 3).map((job) => job.sku_id || job.product_name).join('、')}</p>
+            <h2 className="font-medium">有 {overview.attention_jobs.length} 个任务需要处理</h2>
+            <ul className="divide-y divide-border/60">
+              {overview.attention_jobs.map((job) => {
+                const label = job.sku_id ? `SKU ${job.sku_id}` : job.product_name
+                return (
+                  <li key={job.job_id} className="flex flex-wrap items-center justify-between gap-2 py-2 last:pb-0">
+                    <p className="min-w-0 break-words text-sm text-muted-foreground">{label} · {statusLabel(job.status)}</p>
+                    <Button asChild size="sm" variant="outline">
+                      <Link href={`/tasks?jobId=${job.job_id}`} aria-label={`处理 ${label} 的失败图片`}>处理失败<ArrowRight className="ml-2 h-4 w-4" /></Link>
+                    </Button>
+                  </li>
+                )
+              })}
+            </ul>
           </div>
-          <Button asChild size="sm" variant="outline"><Link href="/tasks">查看失败原因<ArrowRight className="ml-2 h-4 w-4" /></Link></Button>
         </section>
       )}
 

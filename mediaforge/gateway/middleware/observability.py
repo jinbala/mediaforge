@@ -9,8 +9,8 @@ from mediaforge.config import get_settings
 from mediaforge.logging import trace_id_var
 
 # Binary assets are served by MinIO; API responses are JSON/SSE only.
-_SKIP_BODY_PATHS: set[str] = set()
-_SKIP_BODY_PREFIXES: tuple[str, ...] = ()
+_SKIP_BODY_PATHS: set[str] = {"/api/v1/image-provider"}
+_SKIP_BODY_PREFIXES: tuple[str, ...] = ("/api/v1/image-provider/",)
 
 # Truncate large bodies to this many chars in the log
 _BODY_MAX_CHARS = 2000

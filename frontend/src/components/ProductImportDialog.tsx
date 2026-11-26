@@ -219,7 +219,7 @@ export function ProductImportDialog({ open, onOpenChange, onImported }: {
         <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12 text-left sm:px-6">
           <DialogTitle>导入企业商品</DialogTitle>
           <DialogDescription>
-            {mode === 'link' ? '粘贴拼多多、抖音商城或 17 网链接，自动读取商品主图。' : '上传商品表格，核对每个 SKU 的图片后提交。'}
+            {mode === 'link' ? '粘贴拼多多、抖音商城或 17 网链接，读取商品主图和可获取的轮播图。' : '上传商品表格，核对每个 SKU 的图片后提交。'}
           </DialogDescription>
           {accepted === null && (
             <div className="flex flex-wrap gap-2 pt-2" aria-label="导入方式" role="group">

@@ -1,7 +1,7 @@
 import operator
 from typing import Annotated, Literal
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from mediaforge.models.job import AssetOutput, SkuInput
 
@@ -20,4 +20,5 @@ class JobState(TypedDict):
     generation_context: dict
     generation_mode: Literal["standard", "strict", "staged"]
     retry_count: int
+    image_repair: NotRequired[dict]
     status: Literal["running", "done", "partial_fail", "failed"]

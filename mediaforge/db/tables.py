@@ -4,6 +4,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
     DateTime,
     Enum,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base, relationship
@@ -49,6 +51,33 @@ class TenantTable(Base):
     plan = Column(String(20), nullable=False, default="starter")
     quotas = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), default=now_utc)
+
+
+class TenantImageProviderTable(Base):
+    __tablename__ = "tenant_image_providers"
+
+    provider_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(
+        UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    name = Column(String(80), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    base_url = Column(Text, nullable=False)
+    api_format = Column(String(20), nullable=False)
+    model_alias = Column(String(20), nullable=False)
+    model_id = Column(String(200), nullable=False)
+    encrypted_api_key = Column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("idx_tenant_image_providers_tenant", "tenant_id"),
+        Index(
+            "uq_tenant_image_providers_active",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+            sqlite_where=text("is_active"),
+        ),
+    )
 
 
 class UserTable(Base):
@@ -199,6 +228,7 @@ class ProductTable(Base):
     sales_count = Column(Integer, nullable=False, default=0)
     price = Column(Numeric(12, 2), nullable=True)
     image_url = Column(Text, nullable=False, default="")
+    gallery_image_urls = Column(JSON, nullable=False, default=list, server_default="[]")
     search_text = Column(Text, nullable=False, default="")
     index_status = Column(String(20), nullable=False, default="pending")
     index_error = Column(Text, nullable=True)
@@ -211,6 +241,17 @@ class ProductTable(Base):
         Index("idx_products_sku", "sku_code"),
         Index("idx_products_scope", "visibility", "tenant_id"),
         Index("idx_products_index_status", "index_status"),
+    )
+
+
+class HiddenPublicProductTable(Base):
+    __tablename__ = "hidden_public_products"
+
+    tenant_id = Column(
+        UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True
+    )
+    document_id = Column(
+        String(160), ForeignKey("products.document_id", ondelete="CASCADE"), primary_key=True
     )
 
 

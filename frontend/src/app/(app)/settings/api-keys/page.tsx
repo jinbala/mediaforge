@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Copy, Key, Loader2, Plus, Trash2 } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { ImageProviderSettings } from '@/components/ImageProviderSettings'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -85,58 +86,56 @@ export default function ApiKeysPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">API Keys</h2>
-          <p className="text-muted-foreground">管理您的 API 密钥，用于程序化访问 MediaForge 服务</p>
-        </div>
-        <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setCreatedKey(null); setCopied(false) } }}>
-          <DialogTrigger asChild>
-            <Button><Plus className="mr-2 h-4 w-4" />创建密钥</Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>{createdKey ? '密钥已创建' : '创建 API 密钥'}</DialogTitle>
-              <DialogDescription>
-                {createdKey
-                  ? '请立即复制密钥，关闭此对话框后将无法再次查看完整密钥。'
-                  : '为密钥取一个便于辨认的名称。'}
-              </DialogDescription>
-            </DialogHeader>
-            {createdKey ? (
-              <div className="space-y-4">
-                <div className="flex items-center gap-2 rounded-md border bg-muted p-3 font-mono text-sm break-all">
-                  {createdKey}
-                </div>
-                <Button variant="outline" className="w-full" onClick={handleCopy}>
-                  <Copy className="mr-2 h-4 w-4" />
-                  {copied ? '已复制' : '复制密钥'}
-                </Button>
-              </div>
-            ) : (
-              <>
-                <Input
-                  placeholder="例如: Production Backend"
-                  value={newKeyName}
-                  onChange={(e) => setNewKeyName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                />
-                <DialogFooter>
-                  <Button onClick={handleCreate} disabled={creating || !newKeyName.trim()}>
-                    {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    创建
-                  </Button>
-                </DialogFooter>
-              </>
-            )}
-          </DialogContent>
-        </Dialog>
-      </div>
+      <h2 className="text-2xl font-bold tracking-tight">设置</h2>
+      <ImageProviderSettings />
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">活跃密钥</CardTitle>
-          <CardDescription>所有密钥拥有与您的账户相同的权限</CardDescription>
+        <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 space-y-0">
+          <div className="space-y-1.5">
+            <CardTitle className="text-lg">MediaForge 访问密钥</CardTitle>
+            <CardDescription>用于在其他程序中调用 MediaForge API。</CardDescription>
+          </div>
+          <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setCreatedKey(null); setCopied(false) } }}>
+            <DialogTrigger asChild>
+              <Button><Plus className="mr-2 h-4 w-4" />创建密钥</Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{createdKey ? '密钥已创建' : '创建 API 密钥'}</DialogTitle>
+                <DialogDescription>
+                  {createdKey
+                    ? '请立即复制密钥，关闭此对话框后将无法再次查看完整密钥。'
+                    : '为密钥取一个便于辨认的名称。'}
+                </DialogDescription>
+              </DialogHeader>
+              {createdKey ? (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 rounded-md border bg-muted p-3 font-mono text-sm break-all">
+                    {createdKey}
+                  </div>
+                  <Button variant="outline" className="w-full" onClick={handleCopy}>
+                    <Copy className="mr-2 h-4 w-4" />
+                    {copied ? '已复制' : '复制密钥'}
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <Input
+                    placeholder="例如: Production Backend"
+                    value={newKeyName}
+                    onChange={(e) => setNewKeyName(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+                  />
+                  <DialogFooter>
+                    <Button onClick={handleCreate} disabled={creating || !newKeyName.trim()}>
+                      {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                      创建
+                    </Button>
+                  </DialogFooter>
+                </>
+              )}
+            </DialogContent>
+          </Dialog>
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -144,10 +143,9 @@ export default function ApiKeysPage() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : keys.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-8 text-center text-muted-foreground">
-              <Key className="h-10 w-10" />
-              <p>暂无 API 密钥</p>
-              <p className="text-sm">创建一个密钥以开始使用 API</p>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Key className="h-4 w-4" />
+              <p>暂无访问密钥</p>
             </div>
           ) : (
             <div className="divide-y divide-border rounded-md border">

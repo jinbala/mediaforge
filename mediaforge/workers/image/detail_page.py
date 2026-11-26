@@ -61,6 +61,8 @@ class DetailPageWorker(BaseImageWorker):
         for platform in sku.target_platforms:
             generated_paths: list[tuple[str, str]] = []
             for variant, shot_suffix in self.SHOTS:
+                if not self.includes_output(platform, variant):
+                    continue
                 prompt = self._build_prompt(
                     sku,
                     platform,

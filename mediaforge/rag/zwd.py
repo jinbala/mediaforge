@@ -1,4 +1,4 @@
-"""Read the cover displayed in the public 17 网 product gallery."""
+"""Read photos from the public 17 网 product gallery."""
 
 import asyncio
 import os
@@ -11,13 +11,15 @@ _PHOTO_HOST = re.compile(r"img[0-9]+-gms\.17zwd\.com")
 _RENDER_SLOTS = asyncio.Semaphore(2)
 
 _GALLERY = """
-() => {
+(waitForThumbnails) => {
     const gallery = document.querySelector('[class*="index-introSwiper-"]');
     const title = document.querySelector('[class*="index-titleBox-"]')?.textContent?.trim();
     if (!gallery || !title) return null;
     const selector = 'img[src*="/imgextra/"]';
     const cover = gallery.querySelector('[class*="index-bigImg-"] ' + selector);
-    const images = [...new Set([cover, ...gallery.querySelectorAll(selector)]
+    const thumbnails = [...gallery.querySelectorAll('[class*="index-thumbImg-"] img')];
+    if (waitForThumbnails && thumbnails.some(image => !image.matches(selector))) return null;
+    const images = [...new Set([cover, ...thumbnails.filter(image => image.matches(selector))]
         .filter(Boolean).map(image => image.src))];
     return images.length ? { title, images } : null;
 }
@@ -52,6 +54,8 @@ def _allowed_request(url: str, method: str, resource: str, product_url: str) -> 
         return target.netloc == _ASSET_HOST and target.path.startswith("/item/public/")
     if resource in {"fetch", "xhr"}:
         return target.netloc == urlsplit(product_url).netloc and target.path.startswith("/item/")
+    if resource == "image":
+        return is_product_image(url)
     return False
 
 
@@ -71,7 +75,11 @@ async def read_product(url: str) -> tuple[str, list[str]]:
             }
             browser = await engine.chromium.launch(env=browser_env, timeout=6000)
             try:
-                context = await browser.new_context(service_workers="block", accept_downloads=False)
+                context = await browser.new_context(
+                    viewport={"width": 1536, "height": 1024},
+                    service_workers="block",
+                    accept_downloads=False,
+                )
 
                 async def allow_request(route):
                     nonlocal page_error
@@ -100,9 +108,14 @@ async def read_product(url: str) -> tuple[str, list[str]]:
                 response = await page.goto(url, wait_until="domcontentloaded", timeout=9000)
                 if response is None or not response.ok:
                     raise PageUnavailable(page_error)
-                page_error = "17 网商品页暂未显示主图，请重试或手动补图。"
-                result = await page.wait_for_function(_GALLERY, timeout=6000)
+                page_error = "17 网商品页暂未显示商品图片，请重试或手动补图。"
+                result = await page.wait_for_function(_GALLERY, arg=False, timeout=6000)
                 product = await result.json_value()
+                try:
+                    result = await page.wait_for_function(_GALLERY, arg=True, timeout=4000)
+                    product = await result.json_value()
+                except Error:
+                    product = await page.evaluate(_GALLERY, False) or product
                 return product["title"][:500], product["images"]
             finally:
                 await browser.close()

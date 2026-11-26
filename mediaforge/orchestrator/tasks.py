@@ -52,10 +52,12 @@ def process_sku(
     sku_data: dict,
     image_model: str,
     video_model: str,
+    image_repair: dict | None = None,
 ) -> dict:
     """Process exactly one SKU so retries never replay an entire batch."""
     settings = get_settings()
     sku_id = str(sku_data["sku_id"])
+    repair_id = image_repair["id"] if image_repair else None
     _task_logger.info("Processing job_id=%s sku=%s", job_id, sku_id)
 
     async def _run():
@@ -65,7 +67,7 @@ def process_sku(
         from mediaforge.orchestrator.state import JobState
 
         store = await _get_store()
-        if not await store.start_job_item(job_id, sku_id):
+        if not await store.start_job_item(job_id, sku_id, repair_id=repair_id):
             return {"job_id": job_id, "sku_id": sku_id, "status": "skipped"}
 
         graph = await build_batch_graph()
@@ -81,18 +83,39 @@ def process_sku(
             failed=[],
             logs=[],
             generation_context={},
-            generation_mode="standard",
-            retry_count=0,
+            generation_mode="strict" if image_repair else "standard",
+            retry_count=1 if image_repair else 0,
             status="running",
         )
+        repair_context = {}
+        if image_repair:
+            initial["image_repair"] = image_repair
+            items = await store.get_job_items(job_id)
+            repair_context = next(
+                (item["generation_context"] or {} for item in items if item["sku_id"] == sku_id), {}
+            )
         result = await graph.ainvoke(initial)
         completed = [AssetOutput.model_validate(asset) for asset in result.get("completed", [])]
         failed = [AssetOutput.model_validate(asset) for asset in result.get("failed", [])]
-        await store.save_job_item_context(
-            job_id, sku_id, result.get("generation_context", {})
-        )
+        context = result.get("generation_context", {})
+        if image_repair:
+            context["manual_repair_id"] = repair_id
+            context["quality_results"] = (
+                (repair_context.get("quality_results") or []) + (context.get("quality_results") or [])
+            )
+        await store.save_job_item_context(job_id, sku_id, context)
 
+        persisted = {}
+        if image_repair:
+            from mediaforge.db.job_store import current_asset_results
+
+            persisted = {
+                (asset["output_type"], asset["platform"]): asset
+                for asset in current_asset_results(await store.get_assets_for_job(job_id, sku_id=sku_id))
+            }
         for asset in completed:
+            if image_repair and persisted.get((asset.output_type, asset.platform), {}).get("status") == AssetStatus.success:
+                continue
             await store.add_asset(
                 job_id=job_id,
                 tenant_id=tenant_id,
@@ -104,6 +127,9 @@ def process_sku(
                 platform=asset.platform,
             )
         for asset in failed:
+            previous = persisted.get((asset.output_type, asset.platform), {})
+            if previous.get("status") == AssetStatus.failed and previous.get("error_msg") == asset.error and previous.get("file_path") == asset.file_path:
+                continue
             await store.add_asset(
                 job_id=job_id,
                 tenant_id=tenant_id,
@@ -116,13 +142,16 @@ def process_sku(
                 error_msg=asset.error or "unknown",
             )
 
-        progress = await store.complete_job_item(
-            job_id,
-            sku_id,
-            completed_assets=len(completed),
-            failed_assets=len(failed),
-            error_msg=failed[0].error if failed else None,
-        )
+        if image_repair:
+            progress = await store.complete_image_repair(job_id, sku_id)
+        else:
+            progress = await store.complete_job_item(
+                job_id,
+                sku_id,
+                completed_assets=len(completed),
+                failed_assets=len(failed),
+                error_msg=failed[0].error if failed else None,
+            )
         return {"job_id": job_id, "sku_id": sku_id, "status": progress["status"]}
 
     try:
@@ -134,7 +163,9 @@ def process_sku(
 
         async def _record_retry(final: bool):
             store = await _get_store()
-            if final:
+            if final and image_repair:
+                await store.complete_image_repair(job_id, sku_id, error_msg=error_message)
+            elif final:
                 await store.complete_job_item(
                     job_id,
                     sku_id,
@@ -143,7 +174,7 @@ def process_sku(
                     error_msg=error_message,
                 )
             else:
-                await store.mark_job_item_retrying(job_id, sku_id, error_message)
+                await store.mark_job_item_retrying(job_id, sku_id, error_message, repair_id=repair_id)
                 await store.refresh_job_progress(job_id)
 
         final = self.request.retries >= settings.celery_max_retries

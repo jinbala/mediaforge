@@ -7,10 +7,12 @@ import {
   ArrowRight,
   ChevronLeft,
   ChevronRight,
+  EyeOff,
   ImageIcon,
   LayoutGrid,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Search,
   Sparkles,
   Trash2,
@@ -24,6 +26,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ProductImportDialog } from '@/components/ProductImportDialog'
+import { ProductPhotoGallery } from '@/components/ProductPhotoGallery'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
@@ -31,6 +34,7 @@ type Product = {
   document_id: string
   sku_code: string
   visibility: 'global' | 'private'
+  hidden: boolean
   source_type: string
   category: string
   style: string
@@ -41,6 +45,7 @@ type Product = {
   sales_count: number
   price: string | null
   image_url: string
+  gallery_image_urls?: string[]
   index_status: string
   index_error: string | null
   indexed_at: string | null
@@ -49,6 +54,18 @@ type Product = {
 
 type Summary = { global_count: number; private_count: number; indexing_count: number; failed_count: number }
 type Filters = { categories: string[]; styles: string[]; colors: string[] }
+
+const SCOPES = [['all', '全部'], ['global', '公共参考'], ['private', '企业私有'], ['hidden', '已隐藏']] as const
+const ACTIONS = {
+  delete: { label: '删除商品', verb: '删除', icon: Trash2, description: '该商品将从商品库和参考搜索中移除。' },
+  hide: { label: '隐藏商品', verb: '隐藏', icon: EyeOff, description: '该商品将从当前企业的商品库中移除，可以在「已隐藏」中恢复。' },
+  restore: { label: '恢复商品', verb: '恢复', icon: RotateCcw, description: '该商品会重新显示在当前企业的公共参考中。' },
+}
+
+function productAction(product: Product) {
+  if (product.visibility === 'private') return 'delete'
+  return product.hidden ? 'restore' : 'hide'
+}
 
 const PAGE_SIZE = 24
 const EMPTY_SUMMARY: Summary = { global_count: 0, private_count: 0, indexing_count: 0, failed_count: 0 }
@@ -79,7 +96,7 @@ export default function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([])
   const [summary, setSummary] = useState<Summary>(EMPTY_SUMMARY)
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
-  const [scope, setScope] = useState<'all' | 'global' | 'private'>('all')
+  const [scope, setScope] = useState<typeof SCOPES[number][0]>('all')
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('all')
@@ -93,9 +110,9 @@ export default function ProductsPage() {
   const loadRequest = useRef(0)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
-  const [productToDelete, setProductToDelete] = useState<Product | null>(null)
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [pendingProduct, setPendingProduct] = useState<Product | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
 
   useEffect(() => {
@@ -144,25 +161,35 @@ export default function ProductsPage() {
     router.push(`/batch?${key}=${encodeURIComponent(product.sku_code)}`)
   }
 
-  function confirmDelete(product: Product) {
-    setDeleteError(null)
-    setProductToDelete(product)
+  const pendingAction = pendingProduct ? ACTIONS[productAction(pendingProduct)] : null
+  const detailAction = selectedProduct ? ACTIONS[productAction(selectedProduct)] : null
+  const DetailActionIcon = detailAction?.icon
+
+  function confirmAction(product: Product) {
+    setActionError(null)
+    setPendingProduct(product)
   }
 
-  async function removeProduct() {
-    if (!productToDelete || deleting) return
-    setDeleting(true)
-    setDeleteError(null)
-    const { document_id } = productToDelete
+  async function saveProductAction() {
+    if (!pendingProduct || saving) return
+    const { document_id } = pendingProduct
+    const action = productAction(pendingProduct)
+    const encodedId = encodeURIComponent(document_id)
+    setSaving(true)
+    setActionError(null)
     try {
-      await api.delete<void>(`/v1/products/${encodeURIComponent(document_id)}`)
+      if (action === 'delete') {
+        await api.delete<void>(`/v1/products/${encodedId}`)
+      } else {
+        await api.put<void>(`/v1/products/visibility/${encodedId}`, { hidden: action === 'hide' })
+      }
       setSelectedProduct((current) => current?.document_id === document_id ? null : current)
-      setProductToDelete(null)
+      setPendingProduct(null)
       await loadProducts(true)
     } catch (error) {
-      setDeleteError(error instanceof Error ? error.message : '商品删除失败，请重试。')
+      setActionError(error instanceof Error ? error.message : `商品${ACTIONS[action].verb}失败，请重试。`)
     } finally {
-      setDeleting(false)
+      setSaving(false)
     }
   }
 
@@ -196,59 +223,75 @@ export default function ProductsPage() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          {([['all', '全部'], ['global', '公共参考'], ['private', '企业私有']] as const).map(([value, label]) => <Button key={value} size="sm" variant={scope === value ? 'default' : 'outline'} onClick={() => { setScope(value); setPage(1) }}>{label}</Button>)}
+          {SCOPES.map(([value, label]) => <Button key={value} size="sm" variant={scope === value ? 'default' : 'outline'} onClick={() => { setScope(value); setPage(1) }}>{label}</Button>)}
           <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground"><LayoutGrid className="h-3.5 w-3.5" />共 {total} 个商品</span>
         </div>
       </section>
 
-      {loadError ? <div className="rounded-lg border border-destructive/40 p-10 text-center text-sm text-destructive">{loadError}</div> : loading ? <div className="flex min-h-80 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-primary" /></div> : products.length === 0 ? <div className="rounded-xl border border-dashed p-16 text-center"><ImageIcon className="mx-auto h-7 w-7 text-muted-foreground" /><p className="mt-3 font-medium">没有找到匹配的爆款商品</p><p className="mt-1 text-sm text-muted-foreground">调整筛选条件，或导入企业自己的爆款参考。</p></div> : (
+      {loadError ? <div className="rounded-lg border border-destructive/40 p-10 text-center text-sm text-destructive">{loadError}</div> : loading ? <div className="flex min-h-80 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-primary" /></div> : products.length === 0 ? (
+        <div className="rounded-xl border border-dashed p-16 text-center">
+          <ImageIcon className="mx-auto h-7 w-7 text-muted-foreground" />
+          <p className="mt-3 font-medium">{scope === 'hidden' ? '没有找到已隐藏的商品' : '没有找到匹配的爆款商品'}</p>
+          {scope !== 'hidden' && <p className="mt-1 text-sm text-muted-foreground">调整筛选条件，或导入企业自己的爆款参考。</p>}
+        </div>
+      ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-          {products.map((product) => (
-            <div key={product.document_id} className="relative min-w-0 transition hover:-translate-y-0.5">
-              <button onClick={() => setSelectedProduct(product)} className="group flex h-full w-full flex-col overflow-hidden rounded-lg border bg-card text-left hover:border-primary/50 hover:shadow-lg hover:shadow-black/10">
-                <div className="relative aspect-[4/5] w-full overflow-hidden bg-muted">{product.image_url ? <img src={product.image_url} alt={product.sku_code} className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" /> : <div className="flex h-full items-center justify-center"><ImageIcon className="h-6 w-6 text-muted-foreground" /></div>}<div className="absolute left-2 top-2 flex gap-1"><Badge variant={product.visibility === 'global' ? 'secondary' : 'outline'} className="bg-background/85 backdrop-blur">{product.visibility === 'global' ? '公共' : '企业'}</Badge>{product.index_status !== 'indexed' && <Badge variant="outline" className="border-amber-500/40 bg-background/85 text-amber-500">{indexLabel(product.index_status)}</Badge>}</div></div>
-                <div className="w-full p-3"><p className="truncate font-mono text-xs font-semibold">{product.sku_code}</p><p className="mt-1 truncate text-xs text-muted-foreground">{[product.category, product.style, product.color].filter(Boolean).join(' · ') || '未填写商品属性'}</p><p className="mt-2 text-xs tabular-nums"><span className="font-medium">{product.sales_count.toLocaleString()}</span><span className="ml-1 text-muted-foreground">销量</span></p></div>
-              </button>
-              {product.visibility === 'private' && (
-                <Button variant="outline" size="icon" className="absolute right-2 top-2 h-8 w-8 bg-background/85 backdrop-blur hover:text-destructive"
-                  aria-label={`删除商品 ${product.sku_code}`} title="删除商品" disabled={deleting} onClick={() => confirmDelete(product)}>
-                  <Trash2 aria-hidden="true" />
+          {products.map((product) => {
+            const action = productAction(product)
+            const { label, icon: ActionIcon } = ACTIONS[action]
+            return (
+              <div key={product.document_id} className="relative min-w-0 transition hover:-translate-y-0.5">
+                <button onClick={() => setSelectedProduct(product)} className="group flex h-full w-full flex-col overflow-hidden rounded-lg border bg-card text-left hover:border-primary/50 hover:shadow-lg hover:shadow-black/10">
+                  <div className="relative aspect-[4/5] w-full overflow-hidden bg-muted">{product.image_url ? <img src={product.image_url} alt={product.sku_code} className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" /> : <div className="flex h-full items-center justify-center"><ImageIcon className="h-6 w-6 text-muted-foreground" /></div>}<div className="absolute left-2 top-2 flex gap-1"><Badge variant={product.visibility === 'global' ? 'secondary' : 'outline'} className="bg-background/85 backdrop-blur">{product.visibility === 'global' ? '公共' : '企业'}</Badge>{product.index_status !== 'indexed' && <Badge variant="outline" className="border-amber-500/40 bg-background/85 text-amber-500">{indexLabel(product.index_status)}</Badge>}</div></div>
+                  <div className="w-full p-3"><p className="truncate font-mono text-xs font-semibold">{product.sku_code}</p><p className="mt-1 truncate text-xs text-muted-foreground">{[product.category, product.style, product.color].filter(Boolean).join(' · ') || '未填写商品属性'}</p><p className="mt-2 text-xs tabular-nums"><span className="font-medium">{product.sales_count.toLocaleString()}</span><span className="ml-1 text-muted-foreground">销量</span></p></div>
+                </button>
+                <Button variant="outline" size="icon" className={`absolute right-2 top-2 h-8 w-8 bg-background/85 backdrop-blur ${action === 'delete' ? 'hover:text-destructive' : ''}`}
+                  aria-label={`${label} ${product.sku_code}`} title={label} disabled={saving} onClick={() => confirmAction(product)}>
+                  <ActionIcon aria-hidden="true" />
                 </Button>
-              )}
-            </div>
-          ))}
+              </div>
+            )
+          })}
         </div>
       )}
 
       <div className="flex items-center justify-between border-t pt-3 text-sm text-muted-foreground"><span>第 {page} / {pageCount} 页</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={page <= 1 || loading} onClick={() => setPage((value) => value - 1)}><ChevronLeft className="mr-1 h-4 w-4" />上一页</Button><Button variant="outline" size="sm" disabled={page >= pageCount || loading} onClick={() => setPage((value) => value + 1)}>下一页<ChevronRight className="ml-1 h-4 w-4" /></Button></div></div>
 
-      {selectedProduct && <div className="fixed inset-0 z-50 flex justify-end"><button aria-label="关闭详情" className="absolute inset-0 bg-black/55" onClick={() => setSelectedProduct(null)} /><aside className="relative z-10 flex h-full w-full max-w-md flex-col border-l bg-background shadow-2xl"><div className="flex items-center justify-between border-b p-4"><div><p className="text-xs uppercase tracking-wider text-primary">商品详情</p><h2 className="mt-1 font-mono font-semibold">{selectedProduct.sku_code}</h2></div><Button variant="ghost" size="icon" onClick={() => setSelectedProduct(null)}><X className="h-5 w-5" /></Button></div><div className="min-h-0 flex-1 overflow-y-auto"><div className="aspect-square bg-muted">{selectedProduct.image_url ? <img src={selectedProduct.image_url} alt={selectedProduct.sku_code} className="h-full w-full object-contain" /> : null}</div><div className="space-y-5 p-5"><div className="flex flex-wrap gap-2"><Badge>{selectedProduct.visibility === 'global' ? '公共参考' : '企业私有'}</Badge><Badge variant="outline">{indexLabel(selectedProduct.index_status)}</Badge></div><div className="grid grid-cols-2 gap-4 text-sm">{[['品类', selectedProduct.category], ['风格', selectedProduct.style], ['颜色', selectedProduct.color], ['材料', selectedProduct.material], ['季节', selectedProduct.season], ['销量', selectedProduct.sales_count.toLocaleString()]].map(([label, value]) => <div key={label}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1">{value || '—'}</p></div>)}</div><div><p className="text-xs text-muted-foreground">商品描述</p><ProductDescription product={selectedProduct} /></div>{selectedProduct.index_error && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"><AlertTriangle className="mb-2 h-4 w-4" />{selectedProduct.index_error}</div>}</div></div><div className="space-y-2 border-t p-4"><Button className="w-full" onClick={() => createWith(selectedProduct, 'reference')}><Sparkles className="mr-2 h-4 w-4" />以此为爆款参考生成</Button><Button className="w-full" variant="outline" onClick={() => createWith(selectedProduct, 'source')}>作为新品原图生成<ArrowRight className="ml-2 h-4 w-4" /></Button><p className="text-center text-[11px] text-muted-foreground">参考商品只影响构图、灯光与氛围，不会替换新品。</p>
-        {selectedProduct.visibility === 'private' && (
-          <Button className="w-full text-destructive hover:text-destructive" variant="ghost" disabled={deleting}
-            onClick={() => confirmDelete(selectedProduct)}>
-            <Trash2 aria-hidden="true" />删除商品
+      {selectedProduct && <div className="fixed inset-0 z-50 flex justify-end"><button aria-label="关闭详情" className="absolute inset-0 bg-black/55" onClick={() => setSelectedProduct(null)} /><aside className="relative z-10 flex h-full w-full max-w-md flex-col border-l bg-background shadow-2xl"><div className="flex items-center justify-between border-b p-4"><div><p className="text-xs uppercase tracking-wider text-primary">商品详情</p><h2 className="mt-1 font-mono font-semibold">{selectedProduct.sku_code}</h2></div><Button variant="ghost" size="icon" onClick={() => setSelectedProduct(null)}><X className="h-5 w-5" /></Button></div><div className="min-h-0 flex-1 overflow-y-auto">
+        <ProductPhotoGallery key={selectedProduct.document_id} images={[selectedProduct.image_url, ...(selectedProduct.gallery_image_urls ?? [])]} />
+        <div className="space-y-5 p-5"><div className="flex flex-wrap gap-2"><Badge>{selectedProduct.visibility === 'global' ? '公共参考' : '企业私有'}</Badge><Badge variant="outline">{indexLabel(selectedProduct.index_status)}</Badge></div><div className="grid grid-cols-2 gap-4 text-sm">{[['品类', selectedProduct.category], ['风格', selectedProduct.style], ['颜色', selectedProduct.color], ['材料', selectedProduct.material], ['季节', selectedProduct.season], ['销量', selectedProduct.sales_count.toLocaleString()]].map(([label, value]) => <div key={label}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1">{value || '—'}</p></div>)}</div><div><p className="text-xs text-muted-foreground">商品描述</p><ProductDescription product={selectedProduct} /></div>{selectedProduct.index_error && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"><AlertTriangle className="mb-2 h-4 w-4" />{selectedProduct.index_error}</div>}</div></div>
+      <div className="space-y-2 border-t p-4">
+        {!selectedProduct.hidden && <>
+          <Button className="w-full" onClick={() => createWith(selectedProduct, 'reference')}><Sparkles className="mr-2 h-4 w-4" />以此为爆款参考生成</Button>
+          <Button className="w-full" variant="outline" onClick={() => createWith(selectedProduct, 'source')}>作为新品原图生成<ArrowRight className="ml-2 h-4 w-4" /></Button>
+          <p className="text-center text-[11px] text-muted-foreground">参考商品只影响构图、灯光与氛围，不会替换新品。</p>
+        </>}
+        {detailAction && DetailActionIcon && (
+          <Button className={`w-full ${selectedProduct.visibility === 'private' ? 'text-destructive hover:text-destructive' : ''}`} variant="ghost" disabled={saving}
+            onClick={() => confirmAction(selectedProduct)}>
+            <DetailActionIcon aria-hidden="true" />{detailAction.label}
           </Button>
         )}
       </div></aside></div>}
 
-      <Dialog open={Boolean(productToDelete)} onOpenChange={(open) => {
-        if (!open && !deleting) setProductToDelete(null)
+      <Dialog open={Boolean(pendingProduct)} onOpenChange={(open) => {
+        if (!open && !saving) setPendingProduct(null)
       }}>
         <DialogContent className="max-w-sm rounded-lg" onEscapeKeyDown={(event) => {
-          if (deleting) event.preventDefault()
+          if (saving) event.preventDefault()
         }}>
           <DialogHeader>
-            <DialogTitle>删除商品</DialogTitle>
+            <DialogTitle>{pendingAction?.label}</DialogTitle>
             <DialogDescription className="break-words">
-              确定删除 {productToDelete?.sku_code}？该商品将从商品库和参考搜索中移除。
+              确定{pendingAction?.verb} {pendingProduct?.sku_code}？{pendingAction?.description}
             </DialogDescription>
           </DialogHeader>
-          {deleteError && <p role="alert" className="text-sm text-destructive">{deleteError}</p>}
+          {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
           <DialogFooter className="gap-2">
-            <Button variant="outline" disabled={deleting} onClick={() => setProductToDelete(null)} autoFocus>取消</Button>
-            <Button variant="destructive" disabled={deleting} onClick={() => void removeProduct()}>
-              {deleting && <Loader2 className="animate-spin" aria-hidden="true" />}
-              {deleting ? '删除中…' : '确认删除'}
+            <Button variant="outline" disabled={saving} onClick={() => setPendingProduct(null)} autoFocus>取消</Button>
+            <Button variant={pendingAction === ACTIONS.delete ? 'destructive' : 'default'} disabled={saving} onClick={() => void saveProductAction()}>
+              {saving && <Loader2 className="animate-spin" aria-hidden="true" />}
+              {saving ? `${pendingAction?.verb}中…` : `确认${pendingAction?.verb}`}
             </Button>
           </DialogFooter>
         </DialogContent>

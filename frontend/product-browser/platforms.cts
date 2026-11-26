@@ -17,6 +17,7 @@ const douyinPath = '/ecommerce/trade/detail/index.html'
 const idPattern = /^[0-9]{1,24}$/
 const sharePattern = /^[a-zA-Z0-9_-]{1,64}$/
 const itemPath = /^\/item\/([0-9]{1,24})\/?$/
+const MAX_GALLERY_IMAGES = 10
 
 function isZwdHost(host: string) {
   return /^(?:[a-z0-9-]+\.)?17zwd\.com$/.test(host)
@@ -113,6 +114,13 @@ export function isProductPhoto(url: URL, platform: Platform) {
 }
 
 export async function readGallery(page: Page, product: ProductLink) {
+  if (product.platform === '17zwd') {
+    await page.waitForFunction(() => {
+      const gallery = document.querySelector('[class*="index-introSwiper-"]')
+      return gallery?.querySelector('[class*="index-bigImg-"] img[src*="/imgextra/"]') &&
+        !gallery.querySelector('[class*="index-thumbImg-"] img:not([src*="/imgextra/"])')
+    }, undefined, { timeout: 4000 }).catch(() => null)
+  }
   const result = await page.evaluate(platform => {
     const meta = (name: string) => document.querySelector<HTMLMetaElement>(`meta[property="${name}"]`)?.content
     const imageSource = (image: Element | null) => image instanceof HTMLImageElement ? image.currentSrc || image.src : undefined
@@ -122,16 +130,23 @@ export async function readGallery(page: Page, product: ProductLink) {
       if (!container || !title) return null
       const selector = 'img[src*="/imgextra/"]'
       const cover = container.querySelector('[class*="index-bigImg-"] ' + selector)
-      return { title, photos: [cover, ...container.querySelectorAll(selector)].map(imageSource) }
+      const thumbnails = container.querySelectorAll('[class*="index-thumbImg-"] ' + selector)
+      return { title, photos: [cover, ...thumbnails].map(imageSource), coverOnly: false }
     }
     if (platform === 'douyin') {
       const container = document.querySelector('.head-figure')
       const title = document.querySelector('.title-info__text')?.textContent || meta('og:title')
       if (!container || !title) return null
       const cover = container.querySelector('.head-figure__media-view__video__main-pic')
-      return { title, photos: [cover, ...container.querySelectorAll('img')].map(imageSource) }
+      return { title, photos: [cover, ...container.querySelectorAll('img')].map(imageSource), coverOnly: false }
     }
     const heading = document.querySelector('[data-testid="goods-name"], [class*="goodsName"], [class*="goods-name"], h1')
+    const goodsGallery = document.querySelector('[class*="goods-gallery"], [class*="goodsGallery"], [class*="goods-swiper"], [class*="goodsSwiper"]')
+    const title = heading?.textContent || meta('og:title') || document.title
+    const goodsPhotos = goodsGallery && [...goodsGallery.querySelectorAll('img')].map(imageSource).filter(Boolean)
+    if (goodsPhotos?.length) {
+      return { title, photos: goodsPhotos, coverOnly: false }
+    }
     const gallery = Array.from(document.querySelectorAll('img, [style*="background-image"]'))
       .flatMap(element => {
         const rect = element.getBoundingClientRect()
@@ -142,8 +157,9 @@ export async function readGallery(page: Page, product: ProductLink) {
       })
       .sort((first, second) => first.top - second.top || second.area - first.area)
     return {
-      title: heading?.textContent || meta('og:title') || document.title,
+      title,
       photos: [meta('og:image'), ...gallery.slice(0, 16).map(image => image.source)],
+      coverOnly: true,
     }
   }, product.platform)
   if (!result) return null
@@ -154,7 +170,7 @@ export async function readGallery(page: Page, product: ProductLink) {
     } catch {
       return []
     }
-  }).slice(0, 3)
+  }).slice(0, result.coverOnly ? 3 : MAX_GALLERY_IMAGES)
   const title = result.title?.trim().slice(0, 500)
-  return photos.length ? { title: title || `${product.name}商品`, photos } : null
+  return photos.length ? { title: title || `${product.name}商品`, photos, coverOnly: result.coverOnly } : null
 }

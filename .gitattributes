@@ -14,3 +14,13 @@
 *.xlsx binary
 *.woff binary
 *.woff2 binary
+
+# GitHub language statistics for application source
+/Dockerfile -linguist-detectable
+/frontend/Dockerfile -linguist-detectable
+/manage.sh -linguist-detectable
+/scripts/start-zwd-login.ps1 -linguist-detectable
+/frontend/eslint.config.mjs -linguist-detectable
+/frontend/postcss.config.mjs -linguist-detectable
+/frontend/src/app/globals.css -linguist-detectable
+/alembic/script.py.mako -linguist-detectable

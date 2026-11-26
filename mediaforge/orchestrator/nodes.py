@@ -1,8 +1,10 @@
 import json
+from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
 
 from mediaforge.config import get_settings
+from mediaforge.db.image_provider import decrypt_api_key, get_image_provider
 from mediaforge.models.job import GenerationContext, SkuInput
 from mediaforge.orchestrator.state import JobState
 from mediaforge.rag.factory import get_vector_store
@@ -13,7 +15,7 @@ from mediaforge.workers.image import (
     PinduoduoWhiteBackgroundWorker,
     SocialWorker,
 )
-from mediaforge.workers.openrouter_client import OpenRouterClient
+from mediaforge.workers.openrouter_client import ImageProvider, OpenRouterClient
 from mediaforge.workers.video import VeoWorker
 
 
@@ -65,15 +67,22 @@ async def image_worker(state: dict, config: RunnableConfig | None = None) -> dic
     tenant_id: str = state["tenant_id"]
     job_id: str = state["job_id"]
 
-    settings = get_settings()
-    client = OpenRouterClient(
-        api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url
-    )
+    effective_model = _effective_image_model(state)
+    provider = await get_image_provider(UUID(tenant_id))
+    connection = None
+    if provider and provider.model_alias == effective_model:
+        connection = ImageProvider(
+            base_url=provider.base_url,
+            api_format=provider.api_format,
+            model_alias=provider.model_alias,
+            model_id=provider.model_id,
+            api_key=decrypt_api_key(provider),
+        )
+    client = OpenRouterClient(image_provider=connection)
     result = WorkerResult()
     generation_context = GenerationContext.model_validate(state["generation_context"])
     if sku.presentation_mode == "auto":
         sku.presentation_mode = generation_context.presentation_mode
-    effective_model = _effective_image_model(state)
 
     try:
         vector_store = get_vector_store()
@@ -86,14 +95,21 @@ async def image_worker(state: dict, config: RunnableConfig | None = None) -> dic
         ("pdd_white_background", PinduoduoWhiteBackgroundWorker),
         ("social", SocialWorker),
     ]
+    repair = state.get("image_repair")
     for output_type, worker_cls in worker_classes:
         if output_type not in sku.output_types:
+            continue
+        if repair and output_type not in repair["outputs"]:
             continue
         worker = worker_cls(
             client,
             model=effective_model,
             vector_store=vector_store,
         )
+        if repair:
+            worker.repair_id = repair["id"]
+            worker.repair_platforms = set(repair["outputs"][output_type])
+            worker.repair_instruction = repair["instruction"]
         r = await worker.run(
             sku,
             tenant_id,

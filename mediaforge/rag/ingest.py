@@ -164,17 +164,40 @@ async def embed_and_upsert(
 
         async def _safe_prepare_image(row: dict):
             try:
+                product_id = str(row["product_id"]).strip()
                 source, url = await _prepare_image(
                     row,
-                    str(row["product_id"]).strip(),
+                    product_id,
                     storage_scope,
                     image_base_dir,
                     image_files,
                 )
-                return source, url, None
             except Exception as exc:
                 logger.warning("Image persistence failed for {}: {}", row.get("product_id"), exc)
-                return "", "", str(exc)
+                return "", "", [], str(exc)
+
+            filenames = row.get("gallery_image_paths")
+            if not url or not image_files or not isinstance(filenames, list):
+                return source, url, [], None
+
+            async def save_photo(filename: str) -> str:
+                data, ext = image_files[filename]
+                return await get_storage().save_rag_product_image(
+                    scope=storage_scope,
+                    product_id=product_id,
+                    data=data,
+                    ext=ext,
+                    gallery_photo=True,
+                )
+
+            photos = await asyncio.gather(
+                *(save_photo(filename) for filename in filenames), return_exceptions=True
+            )
+            gallery = list(dict.fromkeys(photo for photo in photos if isinstance(photo, str)))
+            failures = sum(isinstance(photo, BaseException) for photo in photos)
+            if failures:
+                logger.warning("{} gallery photos failed to save for {}", failures, product_id)
+            return source, url, gallery, f"{failures} 张商品轮播图未保存，请重新导入。" if failures else None
 
         prepared_images = await asyncio.gather(
             *[
@@ -182,14 +205,12 @@ async def embed_and_upsert(
                 for row in batch
             ]
         )
-        image_sources = [source for source, _, _ in prepared_images]
-        image_urls = [url for _, url, _ in prepared_images]
-        image_errors = [error for _, _, error in prepared_images]
-        image_embs = await asyncio.gather(*[_safe_image_emb(source) for source in image_sources])
+        image_embs = await asyncio.gather(*[_safe_image_emb(source) for source, *_ in prepared_images])
 
-        for row, document_id, search_text, text_emb, img_emb, img_url, image_error in zip(
-            batch, batch_document_ids, texts, text_embs, image_embs, image_urls, image_errors
+        for row, document_id, search_text, text_emb, img_emb, prepared in zip(
+            batch, batch_document_ids, texts, text_embs, image_embs, prepared_images
         ):
+            _, img_url, gallery, image_error = prepared
             errors: list[str] = []
             if require_image and not img_url:
                 errors.append(image_error or "图片未成功保存到 MinIO")
@@ -230,8 +251,9 @@ async def embed_and_upsert(
                     source_type=source_type,
                     search_text=search_text,
                     image_url=img_url,
+                    gallery_image_urls=gallery,
                     index_status="failed" if errors else "indexed",
-                    index_error="；".join(errors) or None,
+                    index_error="；".join(errors) or image_error,
                 )
             )
 

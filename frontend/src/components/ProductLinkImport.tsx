@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ClipboardPaste, ExternalLink, Loader2, LogIn, RefreshCw, UploadCloud } from 'lucide-react'
 import { ProductImageImport } from '@/components/ProductImageImport'
+import { ProductPhotoGallery } from '@/components/ProductPhotoGallery'
 import { Button } from '@/components/ui/button'
 import { api, type ProductLinkPreview } from '@/lib/api'
 import { canUseProductBrowser, readProductInBrowser } from '@/lib/product-browser'
@@ -10,22 +11,22 @@ import { douyinProductLink, manualProductLink } from '@/lib/product-share'
 
 type ReadResult = { url: string } & ({ preview: ProductLinkPreview } | { error: string })
 
-function imageFile(preview: ProductLinkPreview) {
-  const [header, base64] = preview.image_data.split(',', 2)
+function imageFile(image: string, productId: string, index: number) {
+  const [header, base64] = image.split(',', 2)
   const mime = header.slice('data:'.length, -';base64'.length)
   const extension = mime.slice('image/'.length)
   const data = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0))
-  return new File([data], `${preview.product_id}.${extension}`, { type: mime })
+  return new File([data], `${productId}-${index + 1}.${extension}`, { type: mime })
 }
 
 async function readPreview(url: string, platform: string, local: boolean, signal: AbortSignal) {
   if (platform === '拼多多') return readProductInBrowser(url, signal)
   if (!local) return api.previewProductLink(url, signal)
   try {
-    return platform === '17网' ? await readProductInBrowser(url, signal) : await api.previewProductLink(url, signal)
+    return await readProductInBrowser(url, signal)
   } catch {
     signal.throwIfAborted()
-    return platform === '17网' ? api.previewProductLink(url, signal) : readProductInBrowser(url, signal)
+    return api.previewProductLink(url, signal)
   }
 }
 
@@ -49,6 +50,7 @@ export function ProductLinkImport({ importing, onImportingChange, onAccepted }: 
   const previewUrl = platform === '拼多多' && !local ? null : shareUrl
   const result = readResult?.url === previewUrl ? readResult : null
   const preview = result && 'preview' in result ? result.preview : null
+  const photos = preview ? [preview.image_data, ...(preview.gallery_image_data ?? [])] : []
   const readError = result && 'error' in result ? result.error : null
   const reading = Boolean(previewUrl && !result)
   const loginLabel = platform === '17网' ? '登录 17 网' : platform === '抖音商城' ? '登录抖音' : '登录拼多多'
@@ -62,7 +64,7 @@ export function ProductLinkImport({ importing, onImportingChange, onAccepted }: 
         if (!request.signal.aborted) setReadResult({ url: previewUrl, preview })
       } catch (cause) {
         if (!request.signal.aborted) {
-          const error = cause instanceof Error ? cause.message : '商品主图读取失败，请重试。'
+          const error = cause instanceof Error ? cause.message : '商品图片读取失败，请重试。'
           setReadResult({ url: previewUrl, error })
         }
       }
@@ -125,7 +127,7 @@ export function ProductLinkImport({ importing, onImportingChange, onAccepted }: 
     else setClipboardNotice('请先复制商品分享内容，再按 Ctrl+V 粘贴。')
   }
 
-  async function submit(productId: string, description: string, image: File) {
+  async function submit(productId: string, description: string, images: File[]) {
     if (reading || loggingIn || importing) return
     onImportingChange(true)
     setError('')
@@ -133,8 +135,8 @@ export function ProductLinkImport({ importing, onImportingChange, onAccepted }: 
       const quotedDescription = `"${description.replace(/"/g, '""')}"`
       const csv = `product_id,category,style,color,description\r\n${productId},,,,${quotedDescription}\r\n`
       const catalog = new File([csv], 'product-link.csv', { type: 'text/csv' })
-      const result = await api.ingestProducts(catalog, new Map([[image, image.name]]), {
-        [productId]: image.name,
+      const result = await api.ingestProducts(catalog, new Map(images.map((image) => [image, image.name])), {
+        [productId]: images.map((image) => image.name),
       })
       onAccepted(result.accepted)
     } catch (cause) {
@@ -164,14 +166,14 @@ export function ProductLinkImport({ importing, onImportingChange, onAccepted }: 
       </div>
       {reading && (
         <p className="flex items-center gap-2 rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground" role="status">
-          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden="true" />正在读取{platform}商品主图…
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden="true" />正在读取{platform}商品图片…
         </p>
       )}
       {loggingIn && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
           <p className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground" role="status">
             <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden="true" />
-            请在打开的{platform}窗口按页面提示登录，主图读取后会显示在这里。
+            请在打开的{platform}窗口按页面提示登录，读取的图片会显示在这里。
           </p>
           <Button size="sm" variant="outline" onClick={cancelLogin}>取消等待</Button>
         </div>
@@ -191,13 +193,14 @@ export function ProductLinkImport({ importing, onImportingChange, onAccepted }: 
         </div>
       )}
       {manualProduct && !loggingIn && (!previewUrl || readError) && (
-        <ProductImageImport key={manualProduct.url} product={manualProduct} importing={importing} onSubmit={submit} />
+        <ProductImageImport key={manualProduct.url} product={manualProduct} importing={importing}
+          onSubmit={(sku, description, image) => submit(sku, description, [image])} />
       )}
       {preview && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
-          <img src={preview.image_data} alt="商品主图" className="aspect-square w-28 shrink-0 rounded-md bg-muted object-contain" />
-          <div className="min-w-0 flex-1 basis-36 space-y-1">
-            <p className="text-xs text-muted-foreground">{platform}</p>
+        <div className="grid gap-4 rounded-lg border p-3 sm:grid-cols-2">
+          <ProductPhotoGallery key={preview.product_id} images={photos} imageClassName="max-h-64" />
+          <div className="flex min-w-0 flex-col items-start gap-2">
+            <p className="text-xs text-muted-foreground">{platform} · 已读取 {photos.length} 张图</p>
             <p className="break-words text-sm font-medium">{preview.title}</p>
             <p className="break-all font-mono text-xs text-muted-foreground">{preview.product_id}</p>
             {manualProduct && (
@@ -205,14 +208,14 @@ export function ProductLinkImport({ importing, onImportingChange, onAccepted }: 
                 <ExternalLink className="h-3 w-3" aria-hidden="true" />打开商品页
               </a>
             )}
+            <Button className="mt-auto" disabled={importing || reading || loggingIn} onClick={() => {
+              const description = manualProduct ? preview.title + '\n' + manualProduct.url : preview.title
+              void submit(preview.product_id, description, photos.map((photo, index) => imageFile(photo, preview.product_id, index)))
+            }}>
+              {importing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
+              {importing ? '提交中…' : '添加到商品库'}
+            </Button>
           </div>
-          <Button className="ml-auto" disabled={importing} onClick={() => {
-            const description = manualProduct ? preview.title + '\n' + manualProduct.url : preview.title
-            void submit(preview.product_id, description, imageFile(preview))
-          }}>
-            {importing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-            {importing ? '提交中…' : '添加到商品库'}
-          </Button>
         </div>
       )}
       {error && <p className="text-sm text-destructive" role="alert">{error}</p>}

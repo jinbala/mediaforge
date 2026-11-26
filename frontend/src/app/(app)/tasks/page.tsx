@@ -6,10 +6,12 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 
 import { api, ApiError } from '@/lib/api'
+import { resolveTaskAssets } from '@/lib/task-assets'
 import { Loading } from '@/components/Loading'
-import { JobRetryButton, JobTable } from '@/components/JobTable'
+import { JobTable } from '@/components/JobTable'
 import { AssetGallery } from '@/components/AssetGallery'
 import { SkuInputList } from '@/components/SkuInputList'
+import { TaskFailureSummary } from '@/components/TaskFailureSummary'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
@@ -31,15 +33,19 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sseConnected, setSseConnected] = useState(false)
+  const [repairNotice, setRepairNotice] = useState('')
+  const [awaitingRepair, setAwaitingRepair] = useState(false)
 
-  const fetchJob = async (id: string) => {
-    setError(null)
+  const fetchJob = async (id: string, quiet = false) => {
+    if (!quiet) setError(null)
     try {
       const data = await api.get<JobDetail>(`/v1/tasks/${id}`)
+      setError(null)
       setJob(data)
+      setAwaitingRepair(false)
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return
-      setError(err instanceof Error ? err.message : '加载任务失败')
+      if (!quiet) setError(err instanceof Error ? err.message : '加载任务失败')
     } finally {
       setIsLoading(false)
     }
@@ -50,8 +56,18 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
     fetchJob(jobId)
   }, [jobId])
 
+  const legacyRetryRunning = job?.legacy_retry?.status === 'running' || job?.legacy_retry?.status === 'pending'
+  const repairRunning = job?.job_items?.some((item) => item.status.startsWith('repair_')) ?? false
+  const shouldPoll = awaitingRepair || legacyRetryRunning || repairRunning || job?.status === 'running' || job?.status === 'pending'
+
   useEffect(() => {
-    if (TERMINAL_STATUSES.includes(job?.status as JobStatus)) return
+    if (!shouldPoll) return
+    const timer = window.setInterval(() => void fetchJob(jobId, true), 5000)
+    return () => window.clearInterval(timer)
+  }, [jobId, shouldPoll])
+
+  useEffect(() => {
+    if (!job?.status || TERMINAL_STATUSES.includes(job.status)) return
 
     setSseConnected(true)
     const cleanup = api.streamSse(
@@ -69,16 +85,15 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
             }
           })
           if (parsed.event === 'done') {
-            fetchJob(jobId)
+            void fetchJob(jobId, true)
           }
         } catch {
           // Ignore malformed SSE payloads
         }
       },
       () => setSseConnected(false),
-      (err) => {
+      () => {
         setSseConnected(false)
-        setError(err.message)
       }
     )
 
@@ -104,6 +119,15 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
   }
 
   const progress = job.total_skus > 0 ? Math.round((job.done_skus / job.total_skus) * 100) : 0
+  const hasFailures = job.status === 'failed' || job.status === 'partial_fail'
+  const { results, attempts } = resolveTaskAssets(job.assets)
+  const handleRepairUpdate = async (message?: string) => {
+    if (message) {
+      setAwaitingRepair(true)
+      setRepairNotice(message)
+    }
+    await fetchJob(jobId, true)
+  }
 
   return (
     <div className="space-y-6">
@@ -112,7 +136,7 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
           <h2 className="text-2xl font-bold tracking-tight">任务详情</h2>
           <p className="font-mono text-sm text-muted-foreground">{job.job_id}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {sseConnected && (
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -123,9 +147,8 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
             <RefreshCw className="mr-2 h-4 w-4" />
             刷新
           </Button>
-          <JobRetryButton key={job.job_id} jobId={job.job_id} status={job.status} />
-          {TERMINAL_STATUSES.includes(job.status) && (
-            <Button asChild size="sm">
+          {TERMINAL_STATUSES.includes(job.status) && !legacyRetryRunning && (
+            <Button asChild variant="outline" size="sm">
               <Link href={`/batch?reuseJobId=${job.job_id}`}><RotateCcw className="mr-2 h-4 w-4" />沿用配置再次生成</Link>
             </Button>
           )}
@@ -135,20 +158,42 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
         </div>
       </div>
 
+      {job.legacy_retry && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/20 p-3 text-sm">
+          <p>{legacyRetryRunning ? '此前提交的重试正在运行，结束后可继续处理原任务中的失败图。' : `此前提交的重试 · ${STATUS_LABELS[job.legacy_retry.status]}`}</p>
+          <Button asChild variant="outline" size="sm">
+            <Link href={`/tasks?jobId=${job.legacy_retry.job_id}`}>{legacyRetryRunning ? '查看重试进度' : '查看此前重试结果'}</Link>
+          </Button>
+        </div>
+      )}
+      {(repairRunning || repairNotice) && (
+        <div role="status" className="flex items-center gap-2 rounded-md border bg-muted/20 p-3 text-sm">
+          {(repairRunning || awaitingRepair) && <Loader2 className="h-4 w-4 animate-spin" />}
+          <p>{repairRunning || awaitingRepair ? repairNotice || '正在补生成，完成后将更新此任务。' : '本轮补生成已结束，请查看当前结果。'}</p>
+        </div>
+      )}
+      {(hasFailures || repairRunning) && <TaskFailureSummary
+        jobId={jobId}
+        assets={results}
+        items={job.job_items ?? []}
+        disabled={legacyRetryRunning || repairRunning || awaitingRepair}
+        onUpdate={handleRepairUpdate}
+      />}
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             状态
-            <Badge variant={job.status === 'done' ? 'outline' : 'default'}>
-              {STATUS_LABELS[job.status]}
+            <Badge variant={hasFailures ? 'destructive' : job.status === 'done' ? 'outline' : 'default'}>
+              {repairRunning ? '补生成中' : STATUS_LABELS[job.status]}
             </Badge>
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex justify-between text-sm">
-            <span className="text-muted-foreground">进度</span>
+            <span className="text-muted-foreground">已处理 SKU</span>
             <span className="font-medium">
-              {job.done_skus}/{job.total_skus} SKUs
+              {job.done_skus}/{job.total_skus}
             </span>
           </div>
           <Progress value={progress} className="h-2" />
@@ -176,7 +221,7 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
         <CardContent>
           <SkuInputList
             payload={job.input_data}
-            assets={job.assets}
+            assets={results}
             referenceProducts={job.reference_products ?? {}}
             jobItems={job.job_items ?? []}
           />
@@ -187,8 +232,14 @@ function TaskDetail({ jobId, onBack }: { jobId: string; onBack: () => void }) {
         <CardHeader>
           <CardTitle>素材</CardTitle>
         </CardHeader>
-        <CardContent>
-          <AssetGallery assets={job.assets} />
+        <CardContent className="space-y-4">
+          <AssetGallery assets={results} />
+          {attempts.length > 0 && (
+            <details className="rounded-md border p-3">
+              <summary className="cursor-pointer text-sm font-medium">历史生成尝试 ({attempts.length})</summary>
+              <div className="pt-3"><AssetGallery assets={attempts} /></div>
+            </details>
+          )}
         </CardContent>
       </Card>
     </div>
@@ -315,12 +366,7 @@ function TasksView() {
     router.push('/tasks')
   }
 
-  return (
-    <div className="space-y-8">
-      {jobId && <TaskDetail key={jobId} jobId={jobId} onBack={clearJob} />}
-      <TaskList key={jobId ?? 'list'} />
-    </div>
-  )
+  return jobId ? <TaskDetail key={jobId} jobId={jobId} onBack={clearJob} /> : <TaskList />
 }
 
 export default function TasksPage() {

@@ -22,6 +22,6 @@ export async function readProductInBrowser(url: string, signal: AbortSignal, int
     throw new Error('本机登录助手未启动，请运行 scripts/start-zwd-login.ps1 后重试。')
   }
   const result = await response.json()
-  if (!response.ok) throw new Error(result.error || '商品主图读取失败，请重试。')
+  if (!response.ok) throw new Error(result.error || '商品图片读取失败，请重试。')
   return result
 }

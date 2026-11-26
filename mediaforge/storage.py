@@ -8,6 +8,7 @@ filesystem.
 from __future__ import annotations
 
 from functools import lru_cache
+from hashlib import sha256
 
 from mediaforge.config import Settings, get_settings
 
@@ -133,9 +134,15 @@ class MinioStorage:
         product_id: str,
         data: bytes,
         ext: str,
+        *,
+        gallery_photo: bool = False,
     ) -> str:
         clean_ext = ext.lower().lstrip(".")
-        key = f"rag/products/{scope}/{product_id}.{clean_ext}"
+        if gallery_photo:
+            digest = sha256(data).hexdigest()
+            key = f"rag/products/{scope}/{product_id}/gallery/{digest}.{clean_ext}"
+        else:
+            key = f"rag/products/{scope}/{product_id}.{clean_ext}"
         return await self._put(key, data, clean_ext)
 
 

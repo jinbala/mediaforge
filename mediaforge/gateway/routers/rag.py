@@ -19,7 +19,7 @@ from mediaforge.models.tenant import Tenant
 from mediaforge.rag.embeddings import DashScopeEmbeddingClient
 from mediaforge.rag.factory import get_vector_store
 from mediaforge.rag.models import RagResult
-from mediaforge.rag.product_share import ProductShareError, preview_product_share
+from mediaforge.rag.product_share import MAX_GALLERY_IMAGES, ProductShareError, preview_product_share
 
 router = APIRouter(prefix="/api/v1/rag")
 
@@ -57,6 +57,7 @@ class ProductLinkPreview(BaseModel):
     product_id: str
     title: str
     image_data: str
+    gallery_image_data: list[str] = Field(default_factory=list)
 
 
 class IngestStatusResponse(BaseModel):
@@ -222,18 +223,33 @@ async def ingest_products(
         assignments = json.loads(image_assignments)
     except json.JSONDecodeError as exc:
         raise HTTPException(422, "图片分配数据格式不正确。") from exc
-    if not isinstance(assignments, dict) or any(not isinstance(name, str) or not name for name in assignments.values()):
+    if not isinstance(assignments, dict):
         raise HTTPException(422, "图片分配数据格式不正确。")
+    for sku, assignment in assignments.items():
+        names = assignment if isinstance(assignment, list) else [assignment]
+        if not 1 <= len(names) <= MAX_GALLERY_IMAGES or any(
+            not isinstance(name, str) or not name for name in names
+        ):
+            raise HTTPException(422, "商品图片分配格式错误，单个商品最多导入 10 张图。")
+        names = [name.lower() for name in names]
+        if len(set(names)) != len(names):
+            raise HTTPException(422, "同一商品的图片文件名不能重复。")
+        assignments[sku] = names
 
     image_files: dict[str, tuple[bytes, str]] = {}
+    limit = get_settings().max_upload_size
     for image in images:
-        filename = _image_filename(image.filename or "")
-        if not filename:
-            continue
-        image_content = await image.read()
-        ext = Path(filename).suffix or ".jpg"
-        image_files[filename.lower()] = (image_content, ext)
-        await image.close()
+        try:
+            filename = _image_filename(image.filename or "")
+            if not filename:
+                continue
+            image_content = await image.read(limit + 1)
+            if len(image_content) > limit:
+                raise HTTPException(413, "图片超过上传大小限制。")
+            ext = Path(filename).suffix or ".jpg"
+            image_files[filename.lower()] = (image_content, ext)
+        finally:
+            await image.close()
 
     missing_images: list[str] = []
     for row in rows:
@@ -241,11 +257,15 @@ async def ingest_products(
         assigned = assignments.get(reference.product_id)
         if assigned is None and reference.has_image_url:
             continue
-        name = assigned.lower() if assigned is not None else reference.image_name
-        if name in image_files:
-            row.update(image_url="", image_path=name)
+        names = assigned if assigned is not None else [reference.image_name]
+        missing = [name for name in names if name not in image_files]
+        if not missing:
+            row.update(image_url="", image_path=names[0])
+            if len(names) > 1:
+                row["gallery_image_paths"] = names[1:]
         else:
-            missing_images.append(f"{reference.product_id}（{reference.image_ref or '未填写图片文件名'}）")
+            label = "、".join(missing) or reference.image_ref or "未填写图片文件名"
+            missing_images.append(f"{reference.product_id}（{label}）")
     if missing_images:
         preview = "；".join(missing_images[:10])
         suffix = f"；另有 {len(missing_images) - 10} 条" if len(missing_images) > 10 else ""

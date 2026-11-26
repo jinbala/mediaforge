@@ -15,6 +15,7 @@ export type Job = {
   status: JobStatus
   total_skus: number
   done_skus: number
+  platforms: string[]
   created_at: string | null
 }
 
@@ -70,6 +71,7 @@ export type JobDetail = {
   finished_at: string | null
   assets: Asset[]
   job_items: JobItem[]
+  legacy_retry?: { job_id: string; status: JobStatus } | null
 }
 
 export type ReferenceCandidate = {

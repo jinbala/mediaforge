@@ -59,6 +59,7 @@ def test_share_preview_reads_product_cover_without_submitting(imports, monkeypat
         "product_id": "DY-3853123",
         "title": title,
         "image_data": "data:image/png;base64," + base64.b64encode(cover.getvalue()).decode("ascii"),
+        "gallery_image_data": [],
     }
     assert forwarded_urls == [short_url, cover_url]
     assert writes == []
@@ -84,21 +85,34 @@ def test_share_preview_handles_pdd_and_rejects_unexpected_redirect(imports, monk
     assert writes == []
 
 
-def test_17zwd_preview_uses_gallery_cover_and_preserves_sku(imports, monkeypatch):
+def test_17zwd_preview_reads_available_gallery_in_source_order(imports, monkeypatch):
     client, writes = imports
     product_url = "https://cs.17zwd.com/item/168390742"
     cover_url = "https://img03-gms.17zwd.com/imgextra/123/cover.jpg"
-    cover = io.BytesIO()
-    Image.new("RGB", (80, 80)).save(cover, format="JPEG")
+    unavailable = "https://img03-gms.17zwd.com/imgextra/123/missing.jpg"
+    gallery_urls = [
+        "https://img03-gms.17zwd.com/imgextra/123/detail-1.jpg",
+        "https://img03-gms.17zwd.com/imgextra/123/detail-2.jpg",
+    ]
+    images = {}
+    for color, url in zip(["blue", "red", "green"], [cover_url, *gallery_urls]):
+        output = io.BytesIO()
+        Image.new("RGB", (80, 80), color).save(output, format="JPEG")
+        images[url] = output.getvalue()
 
     async def read_page(url):
         assert url == product_url
-        return "加绒弯刀裤", ["https://example.com/cover.jpg", cover_url]
+        return "加绒弯刀裤", [cover_url, "https://example.com/cover.jpg", unavailable, *gallery_urls, cover_url]
 
     def upstream(request):
-        assert str(request.url) == cover_url
         assert request.headers["Referer"] == product_url
-        return httpx.Response(200, content=cover.getvalue())
+        url = str(request.url)
+        if url == unavailable:
+            return httpx.Response(404)
+        return httpx.Response(200, content=images[url])
+
+    def data_url(url):
+        return "data:image/jpeg;base64," + base64.b64encode(images[url]).decode("ascii")
 
     async_client = httpx.AsyncClient
     monkeypatch.setattr(product_share.zwd, "read_product", read_page)
@@ -108,9 +122,32 @@ def test_17zwd_preview_uses_gallery_cover_and_preserves_sku(imports, monkeypatch
     assert response.json() == {
         "product_id": "17ZWD-168390742",
         "title": "加绒弯刀裤",
-        "image_data": "data:image/jpeg;base64," + base64.b64encode(cover.getvalue()).decode("ascii"),
+        "image_data": data_url(cover_url),
+        "gallery_image_data": [data_url(url) for url in gallery_urls],
     }
     assert writes == []
+
+
+def test_ingest_accepts_ordered_gallery_and_rejects_missing_photo(imports):
+    client, writes = imports
+    files = [
+        ("file", ("product.csv", b"product_id,category,style,color\r\nA,,,\r\n")),
+        ("images", ("first.jpg", b"first")),
+        ("images", ("second.jpg", b"second")),
+        ("images", ("third.jpg", b"third")),
+    ]
+    path = "/api/v1/rag/ingest"
+    missing = client.post(path, files=files, data={"image_assignments": '{"A":["first.jpg","missing.jpg"]}'})
+    assert missing.status_code == 422
+    assert "missing.jpg" in missing.json()["detail"]
+    assert writes == []
+
+    result = client.post(path, files=files, data={"image_assignments": '{"A":["first.jpg","third.jpg","second.jpg"]}'})
+    assert result.status_code == 200, result.text
+    assert result.json()["accepted"] == 1
+    rows, _, _ = writes[0]
+    assert rows[0]["image_path"] == "first.jpg"
+    assert rows[0]["gallery_image_paths"] == ["third.jpg", "second.jpg"]
 
 
 def test_17zwd_preview_reports_login_for_manual_fallback(imports, monkeypatch):

@@ -19,6 +19,7 @@ from mediaforge.gateway.routers import (
     api_keys,
     auth,
     batch,
+    image_provider,
     models,
     products,
     rag,
@@ -133,6 +134,7 @@ app.include_router(agent.router)
 app.include_router(api_keys.router)
 app.include_router(auth.router)
 app.include_router(batch.router)
+app.include_router(image_provider.router)
 app.include_router(models.router)
 app.include_router(products.router)
 app.include_router(tasks.router)

@@ -25,7 +25,7 @@ class PinduoduoWhiteBackgroundWorker(BaseImageWorker):
         generation_mode: str = "standard",
     ) -> WorkerResult:
         result = WorkerResult()
-        if "pinduoduo" not in {platform.lower() for platform in sku.target_platforms}:
+        if "pinduoduo" not in sku.target_platforms or not self.includes_output("pinduoduo"):
             return result
         if generation_context is None:
             generation_context = await self.prepare_generation_context(sku, tenant_id)

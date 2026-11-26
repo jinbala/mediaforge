@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import uuid
 
+from sqlalchemy import case
 from sqlalchemy.dialects.postgresql import insert
 
 from mediaforge.db.engine import get_engine
@@ -26,6 +27,7 @@ def build_product_record(
     source_type: str,
     search_text: str,
     image_url: str = "",
+    gallery_image_urls: list[str] | None = None,
     index_status: str = "pending",
     index_error: str | None = None,
 ) -> dict:
@@ -45,6 +47,7 @@ def build_product_record(
         "sales_count": int(row.get("sales_count") or 0),
         "price": _decimal_or_none(row.get("price")),
         "image_url": image_url,
+        "gallery_image_urls": gallery_image_urls or [],
         "search_text": search_text,
         "index_status": index_status,
         "index_error": index_error,
@@ -75,7 +78,11 @@ async def upsert_products(records: list[dict]) -> None:
             "description": excluded.description,
             "sales_count": excluded.sales_count,
             "price": excluded.price,
-            "image_url": excluded.image_url,
+            "image_url": case((excluded.index_status == "pending", table.c.image_url), else_=excluded.image_url),
+            "gallery_image_urls": case(
+                (excluded.index_status == "pending", table.c.gallery_image_urls),
+                else_=excluded.gallery_image_urls,
+            ),
             "search_text": excluded.search_text,
             "index_status": excluded.index_status,
             "index_error": excluded.index_error,

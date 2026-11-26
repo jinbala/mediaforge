@@ -20,6 +20,7 @@ async def test_batch_graph_runs_to_done(db_engine, redis_client, tmp_path, monke
     from mediaforge.orchestrator.state import JobState, SkuInput
 
     _set_required_env(monkeypatch)
+    monkeypatch.setattr("mediaforge.orchestrator.nodes.get_image_provider", AsyncMock(return_value=None))
 
     sku = SkuInput(
         sku_id="SKU-001",

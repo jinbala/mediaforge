@@ -45,35 +45,32 @@ async function openBrowser(visible: boolean) {
   return browser
 }
 
-async function downloadPhoto(sources: URL[], referer: string, signal: AbortSignal) {
-  for (const url of sources) {
-    try {
-      const response = await fetch(url, {
-        signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
-        redirect: 'error',
-        headers: { Referer: referer },
-      })
-      const mime = response.headers.get('content-type')?.split(';')[0].trim()
-      if (!response.ok || !mime || !['image/jpeg', 'image/png', 'image/webp'].includes(mime)) {
-        await response.body?.cancel()
-        continue
-      }
-      if (!response.body) continue
-      const chunks: Uint8Array[] = []
-      let size = 0
-      for await (const chunk of response.body) {
-        size += chunk.length
-        if (size > maxImageSize) break
-        chunks.push(chunk)
-      }
-      if (size > 0 && size <= maxImageSize) {
-        return `data:${mime};base64,${Buffer.concat(chunks).toString('base64')}`
-      }
-    } catch {
-      signal.throwIfAborted()
+async function downloadPhoto(url: URL, referer: string, signal: AbortSignal) {
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
+      redirect: 'error',
+      headers: { Referer: referer },
+    })
+    const mime = response.headers.get('content-type')?.split(';')[0].trim()
+    if (!response.ok || !mime || !['image/jpeg', 'image/png', 'image/webp'].includes(mime)) {
+      await response.body?.cancel()
+      return
     }
+    if (!response.body) return
+    const chunks: Uint8Array[] = []
+    let size = 0
+    for await (const chunk of response.body) {
+      size += chunk.length
+      if (size > maxImageSize) return
+      chunks.push(chunk)
+    }
+    if (size > 0) {
+      return `data:${mime};base64,${Buffer.concat(chunks).toString('base64')}`
+    }
+  } catch {
+    signal.throwIfAborted()
   }
-  throw new ReadError('商品页已打开，主图下载失败。请重试或补图。')
 }
 
 async function readProduct(product: ProductLink, login: boolean, signal: AbortSignal) {
@@ -95,7 +92,9 @@ async function readProduct(product: ProductLink, login: boolean, signal: AbortSi
   }
   page.on('framenavigated', onNavigate)
   try {
-    if (product.platform !== '17zwd') await page.setViewportSize({ width: 430, height: 875 })
+    await page.setViewportSize(product.platform === '17zwd'
+      ? { width: 1536, height: 1024 }
+      : { width: 430, height: 875 })
     if (login) await page.bringToFront()
     await navigate(product.url.href)
     const landed = new URL(page.url())
@@ -114,9 +113,21 @@ async function readProduct(product: ProductLink, login: boolean, signal: AbortSi
         if (!isProductPage(source, product)) continue
         const result = await readGallery(tab, product).catch(() => null)
         if (!result) continue
-        const imageData = await downloadPhoto(result.photos, new URL(source).origin + new URL(source).pathname, signal)
+        const referer = new URL(source)
+        referer.search = ''
+        referer.hash = ''
+        const photos = [...new Set(
+          (await Promise.all(result.photos.map(url => downloadPhoto(url, referer.href, signal))))
+            .filter((photo): photo is string => Boolean(photo)),
+        )]
+        if (!photos.length) throw new ReadError('商品页已打开，图片下载失败。请重试或补图。')
         if (login && product.platform === '17zwd') await writeFile(connected, '')
-        return { product_id: product.sku ?? `DY-${product.id}`, title: result.title, image_data: imageData }
+        return {
+          product_id: product.sku ?? `DY-${product.id}`,
+          title: result.title,
+          image_data: photos[0],
+          gallery_image_data: result.coverOnly ? [] : photos.slice(1),
+        }
       }
       const current = new URL(page.url())
       if (isLoginPage(current, product)) {
@@ -127,7 +138,7 @@ async function readProduct(product: ProductLink, login: boolean, signal: AbortSi
       }
       await delay(500, undefined, { signal })
     }
-    throw new ReadError(`${product.name}暂未显示商品主图，可以重新读取或补图。`)
+    throw new ReadError(`${product.name}暂未显示商品图片，可以重新读取或补图。`)
   } finally {
     page.off('framenavigated', onNavigate)
     if (!login && !page.isClosed()) {

@@ -21,7 +21,7 @@ const allowSelfSignup = process.env.NEXT_PUBLIC_ALLOW_SELF_SIGNUP === 'true'
 export default function LoginPage() {
   const router = useRouter()
   const { login, isAuthenticated, tenant, isLoading, error, clearError } = useAuth()
-  const [email, setEmail] = useState('')
+  const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
   const [localError, setLocalError] = useState<string | null>(null)
 
@@ -32,13 +32,13 @@ export default function LoginPage() {
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     setLocalError(null)
-    const trimmedEmail = email.trim()
-    if (!trimmedEmail || !password) {
-      setLocalError('请输入邮箱和密码')
+    const trimmedAccount = account.trim()
+    if (!trimmedAccount || !password) {
+      setLocalError('请输入账号和密码')
       return
     }
     try {
-      await login(trimmedEmail, password)
+      await login(trimmedAccount, password)
     } catch {
       // Auth store already contains the server error.
     }
@@ -82,15 +82,15 @@ export default function LoginPage() {
 
           <form onSubmit={handleSubmit} className="mt-8 space-y-5">
             <div className="space-y-2">
-              <Label htmlFor="email">邮箱</Label>
+              <Label htmlFor="account">账号</Label>
               <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="name@company.com"
-                value={email}
+                id="account"
+                autoComplete="username"
+                autoCapitalize="none"
+                placeholder="请输入账号或邮箱"
+                value={account}
                 onChange={(event) => {
-                  setEmail(event.target.value)
+                  setAccount(event.target.value)
                   if (error) clearError()
                 }}
                 disabled={isLoading}
