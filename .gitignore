@@ -47,6 +47,7 @@ test_batch_direct.py
 
 # Internal agent/planning docs
 AGENTS.md
+!/AGENTS.md
 docs/superpowers/
 .codex-review-*/
 .tmp-*/
