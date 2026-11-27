@@ -10,6 +10,7 @@
 | 商品链接导入与多图浏览 | 在商品库粘贴拼多多、抖音商城或 17 网分享内容。预览可切换已读取的图片，导入时首图作为封面，其余图片保留在商品相册。读取失败时可重新读取，符合条件时可手动上传。 | [链接导入](../frontend/src/components/ProductLinkImport.tsx) · [商品相册](../frontend/src/components/ProductPhotoGallery.tsx) · [本机浏览器助手](../frontend/product-browser/) · [多图导入测试](../tests/test_product_import.py) |
 | 商品可见性管理 | 在商品库隐藏本企业的公共参考条目，可在「已隐藏」恢复。企业私有商品提供删除操作。 | [商品 API](../mediaforge/gateway/routers/products.py) · [隐藏、恢复和删除测试](../tests/test_product_delete.py) |
 | 亚马逊调研 | 从工作台或侧栏打开「亚马逊调研」。单品、类目沿用单页查询。品牌店铺提交一次美国站店铺或栏目链接即可识别首页并逐页采集，查看来源、状态、去重 ASIN、已确认款式与配色组，展开同配色尺码。可下载带采样范围的逐栏目快照，从「历史记录」恢复或重试失败项。 | [调研页面](<../frontend/src/app/(app)/research/page.tsx>) · [任务 API](../mediaforge/gateway/routers/amazon_research.py) · [店铺编排](../mediaforge/orchestrator/amazon_research.py) · [栏目采集](../mediaforge/rag/amazon_store_collection.py) · [采集与恢复测试](../tests/test_amazon_store_depth.py)。按[调研流程](#亚马逊调研)复核 REQ-001。 |
+| 亚马逊调研工具（REQ-039–044） | 在「亚马逊调研 → 调研工具」运行关键词、Listing、PPC、FBA、到岸成本或 HS 查询。查看来源和缺项，下载 JSON 或从当前浏览器的「工具历史」恢复。 | [工具面板](../frontend/src/components/research/AmazonScriptTools.tsx) · [接口模型](../mediaforge/models/amazon_script_tools.py) · [验收步骤](#调研工具req-039044) · [固定样本测试](../tests/test_amazon_script_tools.py) |
 | 图片创作与拼多多默认值 | 打开空白图片创作表单，默认选中拼多多，仍可按商品切换目标平台。复用任务带入原有参数。亚马逊调研入口预选 Amazon、主图和详情图，并带入可编辑的风格要求。通过 `POST /api/v1/batch/submit` 提交异步任务。 | [创作表单](<../frontend/src/app/(app)/batch/page.tsx>) · [批量提交 API](../mediaforge/gateway/routers/batch.py)。复核空白表单、复用任务和调研带入路径。 |
 | 工作台与任务详情 | 在工作台查看需要处理的任务，可隐藏单条提醒。通过「全部任务」进入详情，核对 SKU、进度、素材及失败原因。 | [工作台](<../frontend/src/app/(app)/dashboard/page.tsx>) · [任务详情](<../frontend/src/app/(app)/tasks/page.tsx>) · [任务 API](../mediaforge/gateway/routers/tasks.py) · [任务测试](../tests/test_tasks_list.py)。隐藏一条提醒并刷新，核对提醒数量及任务列表。 |
 | 单图补生成 | 在任务详情的「失败原因」对单张或全部可补生成的失败图操作，可填写修改要求。复核结果回到原任务，已成功的图片仍能打开。 | [失败处理组件](../frontend/src/components/TaskFailureSummary.tsx) · [补生成测试](../tests/test_tasks_list.py) |
@@ -46,6 +47,40 @@ REQ-003 复核时任选一组已采尺码，打开其 ASIN 来源，核对公开
 单页回归可用 `B0033SHO4Q` 和服装 Best Sellers 榜单，核对排名、主图和单品跳转。补充一条评论片段并查看来源与主题，然后编辑图片需求，检查带入「图片创作」表单。历史回归时，在原浏览器恢复改动前保存的报告，核对主图、联想词、采集时间和下载。
 
 REQ-001 复核可从 [Oakgarden 高领上衣栏目](https://www.amazon.com/stores/page/6AFD3679-6AE1-44C6-93BD-943F86AE2B80) 提交一次，核对自动识别首页、畅销栏目及下拉子栏目。分别查看成功与空页，展开同配色尺码和 ASIN 来源，下载采集记录。再用 [LEGO 店铺栏目](https://www.amazon.com/stores/page/91C58ED9-8C8E-4B46-971F-249F016B6925) 核对不同品类、实际样本及上限提示。刷新后从「历史记录」恢复店铺。固定测试覆盖拒绝访问、部分失败、重试成功、活跃请求去重及企业与账号隔离，执行 `uv run pytest -q tests/test_amazon_research.py tests/test_amazon_store_depth.py`。
+
+### 调研工具（REQ-039–044）
+
+从侧栏进入「亚马逊调研」，展开「调研工具 · 采样、费用与归类」。保留原单品、类目、店铺、图片带入与历史入口。新工具通过 `POST /api/v1/research/amazon/tools` 收发按 `tool` 区分的请求与报告，使用原会话或 API Key 权限，同一路由 `8/minute`。例如关键词请求 `{"tool":"keywords","site":"US","keyword":"linen pants"}`，成功报告含 `report_id`、`schema_version`、`site`、`collected_at`、`status`、`samples` 和去重后的 `keywords`。不支持的站点、链接或参数返回 `422`；采样槽位忙时返回 `503`；外部样本失败返回带失败状态及原因的报告。日志只记录报告标识、工具、状态与耗时，不记录请求和响应正文。
+
+| 编号 | 操作与验收产物 | 实现 |
+| --- | --- | --- |
+| REQ-039 | 输入 `linen pants`，核对原词、`best`/`cheap`/`top` 前缀及 A–Z 后缀，共 30 个美国站英文查询；每查询最多 10 条。长尾词跨查询去重并保留命中查询、请求链接和采集时间。联想不是搜索量。 | [采样](../mediaforge/rag/amazon_script_samples.py) |
+| REQ-040 | 输入 `B0033SHO4Q` 或美国站商品链接；核对标题、品牌、原始价格/币种、评分、评分数、卖点、描述、公开图组可识别图片数、A+、类目路径与可见首次上架日期。缺项为 `null`，页面显示「未采到」。未见 A+ 不等于不存在。 | [商品提取](../mediaforge/rag/amazon_research.py) |
+| REQ-041 | 输入最多 6 个竞品 ASIN 或美国站链接，每行一个；核对 ASIN 去重、字段对齐、逐字段商品页证据。评价量取公开评分数，不当作文字评论条数。让一项失败后重试，原成功样本和采集时间保持不变。 | [竞品采样](../mediaforge/rag/amazon_script_samples.py) |
+| REQ-042 | 输入 `6 × 4 × 0.5 in`、`0.125 lb`、家居与厨房、`10 USD`、配送日 `2026-10-15`、库存起日 `2026-09-30`、库存 2 天、个人计划。固定用例复算小号标准、配送、燃油与物流附加费、跨月仓储、佣金及计划费，单件合计 `6.12 USD`。该数值只用于复核此输入与版本。 | [费率与计算](../mediaforge/workers/amazon_fba_fees.py) |
+| REQ-043 | 输入已确认美国进口信息：原产地、8/10 位 HTSUS、进口日、货值、运费、数量及计税价格。补录有来源且覆盖进口日的从价、按件或定额税费；非 USD 金额另补入汇率、版本和有效期。比较整票、单件、已知小计及待确认项。 | [到岸成本计算](../mediaforge/workers/amazon_landed_cost.py) |
+| REQ-044 | 搜索 `headphones` 和 `8518.30.20`，复核 USITC 官方编码、条目解释、原始税率文本及待核项，打开候选链接并按进口日核对。最多展示 20 项；不输出正式归类结论。 | [USITC 查询](../mediaforge/rag/amazon_script_samples.py) |
+
+采样仅访问美国站公开页面和 USITC 公共现行税则。Amazon 每批最多并发 3，关键词和商品批次分别限时 18 秒和 22 秒，USITC 限时 9 秒；部分成功时可单独重试失败查询或 ASIN。工具报告的 JSON 与页面共用结果，包含时间、实际样本、失败原因或计算输入。工具历史按企业及账号存入当前浏览器，最多 12 份，不写服务器数据库。报告可能包含手动成本，仅向有权限的人员分享。
+
+FBA 以配送日和各库存月选择费率。内置配送表覆盖非服装、非危险品、小号标准件的 `≤2/4/6 oz` 档；其他尺寸、重量或特殊品类可填具版本及有效期的 Seller Central 单件报价。佣金为表单列出的计费类目；旺淡季仓储按实际月份日数拆分，超出版本或缺少必要选项时不填默认费率。账号相关的入库配置、退货、移除等按实际录入。到岸成本不沿用参考脚本的章级平均税率、不用 CIF 代替美国海关计税价格，且不自动推定协定或附加税。没有输入明确的税费与换汇依据时保留缺项，不给最终合计。
+
+本次没有数据库迁移、队列或新环境变量。部署时后端先更新 `/amazon/tools`，再更新前端；回退可切回旧前端及 Gateway，原报告与店铺任务不受影响。新工具历史留在浏览器，不会被旧版本读取。
+
+按需求文档第 10 节记录实际采集数量、报告 ID、测试环境和未覆盖项。固定样本和旧历史回归入口：`uv run pytest -q tests/test_amazon_script_tools.py tests/test_amazon_research.py tests/test_amazon_store_depth.py`。前端按上述入口运行至少一轮六项，复核 JSON 下载、刷新后恢复、部分失败重试及旧调研入口；实际费率由授权卖家后台或进口资料复核，固定样本不作为线上实采或上线验收。
+
+#### 本地验收记录
+
+Windows x64、Python 3.12、Node 24。上述 `pytest` 命令通过 46 项；`npm run build` 和本次变更文件的 ESLint 通过。全量 `npm run lint` 仍在未改动的 `ProductImportDialog.tsx:166` 报 `react-hooks/refs`，未将无关修复纳入本次范围。Edge 使用本地固定样本服务走六项页面流程，复核了 REQ-039 的失败项重试和 REQ-044 的 JSON 下载、刷新后恢复。实采指在同一开发环境直接访问 Amazon 美国站或 USITC 公共接口，不代表生产部署验收。
+
+| 需求编号 | 开发范围或变更位置 | 验收记录 | 证据位置 | 状态 |
+| --- | --- | --- | --- | --- |
+| REQ-039 | 调研工具 → 关键词采样 | 固定样本模拟 1 个 `429`，30 个查询从 29 成功恢复到 30。`linen pants` 实采 30/30，去重后 243 个词。 | 固定报告 `cc80dd48-e043-4cf3-8c6b-80b8d736abf8`，重试 `280b5e6b-e0d6-4693-aa75-953200cc5c00`；实采 `4777c2cb-c33b-40ba-a277-d14f17a504ba` | 本地通过，生产待验收 |
+| REQ-040 | 调研工具 → Listing 结构提取 | 固定样本 1 个 ASIN、2 张可识别图，断言描述、类目、A+、可见日期、缺项。`B0033SHO4Q` 实采成功。 | 固定报告 `535a0c1a-bbc3-4efb-99ed-a85d6982b3cc`；实采 `7fb1f4c1-7032-49cc-bb02-416622d1a392` | 本地通过，生产待验收 |
+| REQ-041 | 调研工具 → PPC 竞品要素提取 | 固定样本 2 个 ASIN 字段对齐。实采 1/2 成功，`B00B2VMP3K` 未找到页面，保留成功行和失败原因。 | 固定报告 `14aa78df-dda3-4832-bb65-71c7be00ece3`；实采 `13a8159a-047c-4f65-9b52-2b96c230a4da` | 本地通过，实采部分成功，生产待验收 |
+| REQ-042 | 调研工具 → FBA 费用计算 | 固定样本 5 项费用，单件 `6.12 USD`，验证跨月、旺季和未覆盖档位。未与授权账号账单核对。 | 固定报告 `271b9aea-daef-4824-9269-6efef60750a6` · [计算测试](../tests/test_amazon_script_tools.py) | 本地通过，账单与生产待验收 |
+| REQ-043 | 调研工具 → 关税和到岸成本计算 | 页面固定样本 6 项，整票 `995.00 USD`；接口另验证非美元汇率、不同税基和过期费率。未使用真实报关资料。 | 固定报告 `cd333853-e283-4a3e-82b7-3d2b2524296b` · [计算测试](../tests/test_amazon_script_tools.py) | 本地通过，实际税费与生产待验收 |
+| REQ-044 | 调研工具 → HS 编码查询 | 固定样本 1 个候选，可下载并恢复；USITC 实查 `headphones` 得 2 个候选，非正式归类。 | 固定报告 `743492e0-4170-4b00-983c-1f2bd746bdc2`；实采 `a304df26-d6ff-47fb-91d0-d841881bb1a6` | 本地通过，生产待验收 |
 
 ## 图片生成与失败处理
 

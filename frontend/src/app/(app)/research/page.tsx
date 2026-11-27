@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 
 import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
+import { AmazonScriptTools } from '@/components/research/AmazonScriptTools'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -568,6 +569,8 @@ export default function ResearchPage() {
         )}
         <p className="sr-only" role="status">{loading ? '正在读取 Amazon 页面' : report ? '调研报告已就绪' : ''}</p>
       </form>
+
+      <AmazonScriptTools key={historyKey ?? 'anonymous'} historyKey={historyKey} keyword={keyword} source={mode === 'product' ? source : ''} />
 
       {error && (
         <div role="alert" className="flex gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">

@@ -57,6 +57,11 @@ class AmazonProduct(AmazonListing):
     reviews: list[AmazonReview] = Field(default_factory=list)
     review_topics: list[AmazonReviewTopic] = Field(default_factory=list)
     image_brief: str
+    description: str | None = None
+    category_path: list[str] | None = None
+    first_available: str | None = None
+    image_count: int | None = None
+    has_aplus: bool | None = None
 
 
 class AmazonStorePage(BaseModel):

@@ -203,6 +203,47 @@ def _collect_reviews(soup: BeautifulSoup, samples: str) -> list[AmazonReview]:
     return reviews
 
 
+def _listing_structure(soup: BeautifulSoup, main: str | None) -> dict:
+    category_path = list(dict.fromkeys(
+        text for link in soup.select("#wayfinding-breadcrumbs_feature_div li a", limit=20)
+        if (text := _text(link))
+    ))
+    first_available = None
+    for label in soup.select(
+        "#productDetails_feature_div th, #productDetails_techSpec_section_1 th, "
+        "#productDetails_detailBullets_sections1 th, "
+        "#detailBulletsWrapper_feature_div .a-text-bold"
+    ):
+        normalized = re.sub(r"[\u200e\u200f]", "", _text(label) or "").strip(" :")
+        if normalized.casefold() != "date first available":
+            continue
+        value = label.find_next_sibling("td" if label.name == "th" else "span")
+        if first_available := _text(value, 100):
+            break
+
+    # 只数当前公开图组里能识别的商品图；同一图片的尺寸变换不重复计数。
+    urls = {main} if main else set()
+    for tag in soup.select(
+        "#altImages li.item:not(.videoThumbnail) img, #imageBlockThumbs img", limit=50
+    ):
+        if url := _image_from_tag(tag):
+            urls.add(url)
+    images = {urlsplit(url).path.split("/images/I/", 1)[1].split(".", 1)[0] for url in urls}
+    aplus_blocks = soup.select(
+        "#aplus, #aplus_feature_div, #aplusBrandStory_feature_div, "
+        ".aplus-v2, .a-plus-content, #aplusPageWidget", limit=20,
+    )
+    return {
+        "description": _text(soup.select_one("#productDescription"), 5000),
+        "category_path": category_path or None,
+        "first_available": first_available,
+        "image_count": len(images) or None,
+        # 空占位不当作 A+；整块未返回时，也不能断言商品没有 A+。
+        "has_aplus": any(_text(block) or block.select_one("img[src]")
+                         for block in aplus_blocks) if aplus_blocks else None,
+    }
+
+
 def _parse_product(soup: BeautifulSoup, url: str, samples: str) -> AmazonProduct:
     title = _first_text(soup, "#productTitle")
     if not title:
@@ -246,12 +287,14 @@ def _parse_product(soup: BeautifulSoup, url: str, samples: str) -> AmazonProduct
         brand = re.sub(r"^(?:Visit the (.+) Store|Brand:\s*(.+))$", r"\1\2", brand, flags=re.I)
     image = soup.select_one("img#landingImage, img#imgBlkFront, img#ebooksImgBlkFront")
     social_image = soup.select_one('meta[property="og:image"]')
+    image_url = _image_from_tag(image) or _amazon_image_url(
+        social_image.get("content") if social_image else None
+    )
     return AmazonProduct(
         asin=url.rsplit("/", 1)[-1],
         title=title,
         url=url,
-        image_url=_image_from_tag(image)
-        or _amazon_image_url(social_image.get("content") if social_image else None),
+        image_url=image_url,
         brand=brand,
         store_url=store_url,
         category=_first_text(soup, "#wayfinding-breadcrumbs_feature_div li:last-child a"),
@@ -270,6 +313,7 @@ def _parse_product(soup: BeautifulSoup, url: str, samples: str) -> AmazonProduct
         reviews=reviews,
         review_topics=topics,
         image_brief="\n".join(brief),
+        **_listing_structure(soup, image_url),
     )
 
 
@@ -556,13 +600,16 @@ async def _fetch_page(
     raise AmazonFetchError("Amazon 页面跳转次数过多，请使用最终页面链接。", "redirect", url)
 
 
+def suggestion_request(keyword: str) -> httpx.URL:
+    return httpx.URL(
+        SUGGESTIONS, params={"mid": "ATVPDKIKX0DER", "alias": "aps", "prefix": keyword}
+    )
+
+
 async def _fetch_suggestions(client: httpx.AsyncClient, keyword: str) -> list[str] | None:
     try:
         async with asyncio.timeout(7):
-            async with client.stream(
-                "GET", SUGGESTIONS,
-                params={"mid": "ATVPDKIKX0DER", "alias": "aps", "prefix": keyword},
-            ) as response:
+            async with client.stream("GET", suggestion_request(keyword)) as response:
                 response.raise_for_status()
                 data = json.loads(await _read_body(response, 256_000))
         return list(dict.fromkeys(

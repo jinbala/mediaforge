@@ -31,6 +31,11 @@ export type AmazonProduct = AmazonListing & {
   reviews: { text: string; rating: string | null; source: 'amazon' | 'manual' }[]
   review_topics: { label: string; matches: number; suggestion: string }[]
   image_brief: string
+  description?: string | null
+  category_path?: string[] | null
+  first_available?: string | null
+  image_count?: number | null
+  has_aplus?: boolean | null
 }
 
 export type AmazonReport = {
@@ -122,6 +127,14 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
       '评分数：' + (product.rating_count ?? '未公开'),
     )
     if (product.sales_ranks.length) lines.push('', '### 畅销排名', ...product.sales_ranks.map((rank) => '- ' + escape(rank)))
+    if ('image_count' in product) {
+      lines.push('', '### Listing 结构',
+        '类目路径：' + escape(product.category_path?.join(' / ') ?? '未采到'),
+        '首次可见上架日期：' + escape(product.first_available ?? '未采到'),
+        '可识别图片数：' + (product.image_count ?? '未采到'),
+        'A+：' + (product.has_aplus == null ? '未采到' : product.has_aplus ? '公开页可见' : '识别到空模块'),
+        '描述：' + escape(product.description ?? '未采到'))
+    }
     if (product.store_url) lines.push('品牌店铺：' + product.store_url)
     if (product.highlights.length) lines.push('', '### 商品页卖点', ...product.highlights.map((item) => '- ' + escape(item)))
     if (product.review_topics.length) {

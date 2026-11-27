@@ -1,4 +1,5 @@
 from datetime import datetime
+from time import monotonic
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,6 +18,16 @@ from mediaforge.models.amazon_research_run import (
     AmazonResearchRunSummary,
     RetryTarget,
 )
+from mediaforge.models.amazon_script_tools import (
+    FbaInput,
+    HsInput,
+    KeywordInput,
+    LandedInput,
+    ListingInput,
+    PpcInput,
+    ScriptInput,
+    ScriptOutput,
+)
 from mediaforge.models.tenant import Tenant
 from mediaforge.models.user import User
 from mediaforge.orchestrator.tasks import process_amazon_research
@@ -26,6 +37,9 @@ from mediaforge.rag.amazon_research import (
     normalize_source,
     run_amazon_research,
 )
+from mediaforge.rag.amazon_script_samples import lookup_hs, sample_keywords, sample_products
+from mediaforge.workers.amazon_fba_fees import calculate_fba
+from mediaforge.workers.amazon_landed_cost import calculate_landed
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
 
@@ -44,6 +58,35 @@ async def research_amazon(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except AmazonFetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/amazon/tools", response_model=ScriptOutput)
+@limiter.limit("8/minute")
+async def research_amazon_tool(
+    request: Request,
+    body: ScriptInput,
+    _tenant: Tenant = Depends(get_tenant_only),
+) -> ScriptOutput:
+    start = monotonic()
+    try:
+        if isinstance(body, KeywordInput):
+            result = await sample_keywords(body)
+        elif isinstance(body, (ListingInput, PpcInput)):
+            result = await sample_products(body)
+        elif isinstance(body, FbaInput):
+            result = calculate_fba(body)
+        elif isinstance(body, LandedInput):
+            result = calculate_landed(body)
+        elif isinstance(body, HsInput):
+            result = await lookup_hs(body)
+    except AmazonSourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AmazonFetchError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # 脚本报告只使用本次入参和公开来源，不记录商品词、报关资料和响应正文。
+    logger.info("Amazon tool report={} tool={} status={} duration_ms={}",
+                result.report_id, result.tool, result.status, round((monotonic() - start) * 1000))
+    return result
 
 
 def _owner(principal: tuple[User, Tenant]) -> tuple[UUID, UUID]:
