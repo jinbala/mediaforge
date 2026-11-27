@@ -1,53 +1,23 @@
 import re
 import unicodedata
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
-from mediaforge.models.amazon_skills import SkillId, SkillReport, SkillRequest, SkillSection
+from mediaforge.models.amazon_skills import SkillId, SkillReport, SkillRequest
+from mediaforge.rag.amazon_script_samples import lookup_hs
 from mediaforge.workers.amazon_fba_fees import calculate_fba, currency_round
+from mediaforge.workers.amazon_landed_cost import calculate_landed
+from mediaforge.workers.amazon_skill_analytics import ANALYTICS
 from mediaforge.workers.amazon_skill_definitions import SKILLS
+from mediaforge.workers.amazon_skill_growth import GROWTH
+from mediaforge.workers.amazon_skill_storefront import STOREFRONT
+from mediaforge.workers.amazon_skill_support import money, number, percent, pipe_rows, section
+
+ADVANCED_HANDLERS = {**GROWTH, **ANALYTICS, **STOREFRONT}
 
 D = Decimal
 BRAND_REGISTRY = "https://brandservices.amazon.com/brandregistry"
 SELLER = "https://sellercentral.amazon.com/"
-
-
-def number(value, *, percentage=False, count=False):
-    try:
-        result = D(value)
-        if not result.is_finite() or not 0 <= result <= (100 if percentage else 100_000_000):
-            raise ValueError
-        if count and result != result.to_integral_value():
-            raise ValueError
-        return result
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError("数值必须为有效的非负数；比例最高 100%，数量须为整数。") from exc
-
-
-def money(value):
-    return str(currency_round(value))
-
-
-def percent(value):
-    return money(value * 100) + "%" if value is not None else "未知（分母为零）"
-
-
-def pipe_rows(value, count):
-    for line_no, line in enumerate(value.splitlines(), 1):
-        if not line.strip():
-            continue
-        fields = [cell.strip() for cell in line.split("|")]
-        if len(fields) != count or any(not cell for cell in fields):
-            raise ValueError(f"第 {line_no} 行应有 {count} 个非空字段，以 | 分隔。")
-        yield fields
-
-
-def section(title, *rows, columns=None):
-    return SkillSection(
-        title=title,
-        rows=[[str(value) for value in row] for row in rows],
-        columns=columns or ["项目", "建议／结果"],
-    )
 
 
 def _content(values, story=False):
@@ -427,8 +397,16 @@ def run_skill(req: SkillId, body: SkillRequest) -> SkillReport:
     definition = SKILLS[req]
     values = {key: value.strip() for key, value in body.values.items() if value.strip()}
     known = {field.key for field in definition.fields}
-    if set(values) - known or (body.fba is not None and req != "REQ-059"):
+    # REQ-059 复用 FBA 技能的标量，成本和数量作为订单利润附加输入。
+    allowed_shared = {"REQ-059": {"cost", "quantity"}, "REQ-095": set()}.get(req, set())
+    if set(body.values) - known - allowed_shared or (
+        body.fba is not None
+        and req != "REQ-059"
+        or (body.landed is not None or body.hs is not None)
+        and req != "REQ-095"
+    ):
         raise ValueError("包含此技能不接受的字段。")
+    # 每个领域处理器解析自己的多列行格式；目录中的标量校验在这里统一执行。
     nums = {}
     for field in definition.fields:
         value = values.get(field.key)
@@ -449,6 +427,12 @@ def run_skill(req: SkillId, body: SkillRequest) -> SkillReport:
             )
             if field.key in {"boxes", "quantity", "price"} and nums[field.key] <= 0:
                 raise ValueError("必须大于零：" + field.label)
+    # REQ-059 的利润专属输入复用相同非负数和整件校验，随后交给 REQ-042 计算费用。
+    if req == "REQ-059":
+        nums["cost"] = number(values.get("cost", ""))
+        nums["quantity"] = number(values.get("quantity", ""), count=True)
+        if nums["quantity"] <= 0:
+            raise ValueError("订单件数必须大于 0。")
     fba = None
     if req == "REQ-059":
         if body.fba is None:
@@ -467,8 +451,21 @@ def run_skill(req: SkillId, body: SkillRequest) -> SkillReport:
                 ("订单贡献 USD", "待确认" if margin is None else money(margin * nums["quantity"])),
             )
         ]
+    elif req == "REQ-095":
+        if body.landed is None and body.hs is None:
+            raise ValueError("请填写 HS 查询或已确认的到岸成本参数。")
+        hs_query = body.hs.query if body.hs is not None else "未查询"
+        details = [
+            section(
+                "归类与税费核对",
+                ("HS 候选查询", hs_query),
+                ("执行顺序", "先核对归类，再用已确认的税号、税率和费用计算。"),
+                ("缺项", "未确认费率及参数保留为待确认，不从候选税号推定关税。"),
+            )
+        ]
     else:
-        details = _dispatch(req, values, nums)
+        handler = ADVANCED_HANDLERS.get(req)
+        details = handler(values) if handler else _dispatch(req, values, nums)
     return SkillReport(
         req=req,
         title=definition.title,
@@ -477,4 +474,13 @@ def run_skill(req: SkillId, body: SkillRequest) -> SkillReport:
         confirmed_inputs=values,
         limitations=[definition.note, "美国站；用户输入不等于平台验证。"],
         fba=fba,
+        landed=calculate_landed(body.landed) if body.landed is not None else None,
     )
+
+
+async def generate_skill_report(req: SkillId, body: SkillRequest) -> SkillReport:
+    report = run_skill(req, body)
+    # 查询只提供候选，绝不把候选自动写入计税请求；两项都使用原脚本结果和来源。
+    if req == "REQ-095" and body.hs is not None:
+        report.hs = await lookup_hs(body.hs)
+    return report

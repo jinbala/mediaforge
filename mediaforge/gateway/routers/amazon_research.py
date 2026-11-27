@@ -44,7 +44,7 @@ from mediaforge.rag.amazon_script_samples import lookup_hs, sample_keywords, sam
 from mediaforge.workers.amazon_fba_fees import calculate_fba
 from mediaforge.workers.amazon_landed_cost import calculate_landed
 from mediaforge.workers.amazon_skill_definitions import SKILLS
-from mediaforge.workers.amazon_skills import run_skill
+from mediaforge.workers.amazon_skills import generate_skill_report
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
 
@@ -106,9 +106,11 @@ async def generate_amazon_skill(
     _tenant: Tenant = Depends(get_tenant_only),
 ) -> SkillReport:
     try:
-        return run_skill(req, body)
+        return await generate_skill_report(req, body)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AmazonFetchError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _owner(principal: tuple[User, Tenant]) -> tuple[UUID, UUID]:
