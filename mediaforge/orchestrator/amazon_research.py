@@ -18,6 +18,8 @@ from mediaforge.rag.amazon_research import SUGGESTIONS, _fetch_suggestions, amaz
 from mediaforge.rag.amazon_store_analysis import (
     archive,
     build_product_matrix,
+    build_store_lifecycle,
+    compare_store_samples,
     section_index,
     store_public_report,
     summarize_archive,
@@ -27,6 +29,7 @@ from mediaforge.rag.amazon_store_collection import (
     SECTION_ASIN_LIMIT,
     SECTION_LIMIT,
     collect_evidence,
+    collect_listing_date,
     discover_sections,
     page_id,
     section_step,
@@ -191,6 +194,37 @@ async def _localize(run: AmazonResearchRun) -> None:
         )
 
 
+async def _report_store_lifecycle(
+    run: AmazonResearchRun,
+    token: UUID,
+    products: list[AmazonStoreSample],
+) -> None:
+    snapshot = run.snapshot
+    change = compare_store_samples(snapshot, await store.prior_store_snapshots(run))
+    saved = {
+        item.asin: item
+        for item in (snapshot.lifecycle.dates if snapshot.lifecycle else [])
+        if item.date_text
+    }
+    snapshot.lifecycle = build_store_lifecycle(products, change)
+    new_samples = dict.fromkeys(
+        asin for asins in snapshot.product_matrix.new_sections.values() for asin in asins
+    )
+    if change:
+        new_samples.update(dict.fromkeys(change.newly_seen))
+    # 优先查询公开新品栏目样本，最多三件。无日期也保留 ASIN、查询时间与原因。
+    selected = list(new_samples)[:3]
+    remaining = [asin for asin in selected if asin not in saved]
+    if remaining:
+        await store.checkpoint(run, token, "listing_dates")
+        async with amazon_public_client() as client:
+            collected = await asyncio.gather(
+                *(collect_listing_date(client, asin) for asin in remaining)
+            )
+        saved.update((item.asin, item) for item in collected)
+    snapshot.lifecycle.dates = [saved[asin] for asin in selected]
+
+
 async def process_research(run_id: UUID, attempt: int) -> bool:
     started = monotonic()
     run, token, busy = await store.claim_run(run_id, attempt)
@@ -217,6 +251,7 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
             snapshot.notes.append("部分店铺字段未取得中文译文，仍可查看原文和对应商品。")
         listings = _update_report(run)
         snapshot.product_matrix = build_product_matrix(snapshot, listings)
+        await _report_store_lifecycle(run, token, listings)
         sections = [
             item
             for item in snapshot.evidence

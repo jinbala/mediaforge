@@ -143,6 +143,11 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
         + _nav(("Home", HOME), ("About Us", ABOUT)),
     )
     respx.get(NEW).respond(200, text=_cards(IDS[1]) + _nav(("Hidden Collection", FAILED)))
+    listing_date = respx.get(f"{AMAZON}/dp/{IDS[1]}").respond(
+        200,
+        text="<table><tr><th>Date First Available</th><td>November 1, 2026</td></tr></table>",
+    )
+
     respx.get(ABOUT).respond(200, text="<main>Fixture manufacturer information.</main>")
     retry = respx.get(FAILED).respond(503)
     payload = {"mode": "store", "source": INITIAL, "submission_id": str(uuid4())}
@@ -180,6 +185,9 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
     assert summary["unknown_family_count"] == 0
     assert snap["product_matrix"]["asin_count"] == 3
     assert snap["product_matrix"]["new_sections"]
+    assert snap["lifecycle"]["change"] is None
+    assert snap["lifecycle"]["dates"][0]["date_text"] == "November 1, 2026"
+    assert snap["lifecycle"]["dates"][0]["label"] == "first_available"
 
     assert len(snap["asin_sources"][IDS[1]]) == 3
     assert len(first["report"]["listings"]) == 3
@@ -198,7 +206,7 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
     assert latest["status"] == "done", latest.get("error")
     recovered = next(item for item in latest["snapshot"]["evidence"] if item["key"] == failed_key)
     assert recovered["status"] == "empty" and recovered["attempts"] == 2
-    assert len(home.calls) == len(entry.calls) == 1
+    assert len(home.calls) == len(entry.calls) == len(listing_date.calls) == 1
     assert len(retry.calls) == 2
 
     repeated = await client.post(API, json=payload)
@@ -557,3 +565,45 @@ def test_empty_product_matrix_preserves_unknown_price_share():
     matrix = build_product_matrix(snapshot, [])
     assert not matrix.prices and not matrix.new_sections and not matrix.rating_leaders
     assert all(band.share_pct is None for band in matrix.price_bands)
+
+
+@respx.mock
+async def test_store_lifecycle_compares_same_owner_snapshots_and_keeps_observation_dates(api):
+    client, _, identity, _, _ = api
+    entry = respx.get(INITIAL)
+    entry.respond(200, text=_cards(IDS[0], IDS[1]))
+    first = await client.post(API, json={"mode": "store", "source": INITIAL})
+    first_id = first.json()["id"]
+    prior = await _run_submitted(client, first_id)
+    assert prior["snapshot"]["lifecycle"]["change"] is None
+    assert prior["snapshot"]["lifecycle"]["sizes"] == {"S": 1, "M": 1}
+
+    entry.respond(200, text=_cards(IDS[1], IDS[2]))
+    release = respx.get(f"{AMAZON}/dp/{IDS[2]}").respond(
+        200,
+        text="<table><tr><th>Release date</th><td>October 10, 2026</td></tr></table>",
+    )
+    second = await client.post(API, json={"mode": "store", "source": INITIAL})
+    current = await _run_submitted(client, second.json()["id"])
+    lifecycle = current["snapshot"]["lifecycle"]
+    change = lifecycle["change"]
+    assert change["previous_run_id"] == first_id
+    assert change["newly_seen"] == [IDS[2]]
+    assert change["no_longer_seen"] == [IDS[0]]
+    assert change["previous_collected_at"] < change["current_collected_at"]
+    assert change["series_changes"] == [
+        {
+            "family_asin": IDS[0],
+            "newly_seen": [IDS[2]],
+            "no_longer_seen": [IDS[0]],
+        }
+    ]
+    assert lifecycle["dates"][0]["label"] == "release_date"
+    assert lifecycle["dates"][0]["url"].endswith(IDS[2])
+
+    identity["owner"] = uuid4(), uuid4()
+    other = await client.post(API, json={"mode": "store", "source": INITIAL})
+    other = await _run_submitted(client, other.json()["id"])
+    assert other["snapshot"]["lifecycle"]["change"] is None
+    assert other["snapshot"]["lifecycle"]["dates"] == []
+    assert len(release.calls) == 1

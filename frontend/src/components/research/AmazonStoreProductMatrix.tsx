@@ -1,12 +1,17 @@
 import { useState } from 'react'
 import {
   amazonArchiveSampleId, amazonEvidenceSampleId, amazonPortfolioPriceRule, amazonPriceBandLabel,
-  amazonPriceCoverage, revealAmazonSample, type AmazonRun, type AmazonStoreProductMatrix as Matrix,
+  amazonListingDateLabel, amazonPriceCoverage, amazonSampleChangeLabel, amazonTime,
+  amazonUnknownLaunchCadence, revealAmazonSample, type AmazonRun, type AmazonStoreProductMatrix as Matrix,
 } from '@/lib/amazon-research'
 
-export function AmazonStoreProductMatrix({ run, matrix }: { run: AmazonRun; matrix: Matrix }) {
+export function AmazonStoreProductMatrix({ run, matrix, onOpen }: {
+  run: AmazonRun; matrix: Matrix; onOpen: (id: string) => void
+}) {
   const [expandedBand, setExpandedBand] = useState<number | null>(null)
   const sections = new Map(run.snapshot.evidence.map((item) => [item.key, item]))
+  const lifecycle = run.snapshot.lifecycle
+  const change = lifecycle?.change
   const names = new Map(run.report?.listings.map((item) => [item.asin, item.title_zh ?? item.title]))
   const section = (key: string) => {
     const item = sections.get(key)
@@ -103,6 +108,37 @@ export function AmazonStoreProductMatrix({ run, matrix }: { run: AmazonRun; matr
           {!Object.keys(matrix.new_sections).length && <li>公开导航中未识别到新品栏目，新品样本未知。</li>}
         </ul>
       </details>
+      {lifecycle && (
+        <details className="rounded-md border p-3 text-sm">
+          <summary className="cursor-pointer font-medium">新品节奏与产品线</summary>
+          <p className="my-2 text-xs text-muted-foreground">{amazonUnknownLaunchCadence}</p>
+          <ul className="space-y-1 text-xs">
+            <li>配色 · {Object.entries(lifecycle.colors).map(([name, count]) => `${name} ${count} 个`).join('、') || '未知'} · 待确认 {lifecycle.missing_color} 个 ASIN</li>
+            <li>尺码 · {Object.entries(lifecycle.sizes).map(([name, count]) => `${name} ${count} 个`).join('、') || '未知'} · 待确认 {lifecycle.missing_size} 个 ASIN</li>
+            {lifecycle.dates.map((item) => (
+              <li key={item.asin}>
+                <a href={item.url} target="_blank" rel="noreferrer" className="text-primary hover:underline">{item.asin}</a>
+                {' · ' + amazonListingDateLabel(item) + ' · ' + amazonTime(item.collected_at)}
+              </li>
+            ))}
+            {!lifecycle.dates.length && <li>公开日期样本未知。</li>}
+          </ul>
+          {change ? (
+            <div className="mt-2 space-y-1 border-t pt-2 text-xs">
+              <p>{amazonTime(change.previous_collected_at)} → {amazonTime(change.current_collected_at)}</p>
+              <p>{amazonSampleChangeLabel(change)}</p>
+              {change.newly_seen.length > 0 && <p>新观察 ASIN · {change.newly_seen.join('、')}</p>}
+              {change.no_longer_seen.length > 0 && <p>未再观察 ASIN · {change.no_longer_seen.join('、')}</p>}
+              {change.series_changes.length ? (
+                <ul className="space-y-1">{change.series_changes.map((item) => (
+                  <li key={item.family_asin}>规格组 {item.family_asin} · 新观察 {item.newly_seen.join('、') || '无'} · 未再观察 {item.no_longer_seen.join('、') || '无'}</li>
+                ))}</ul>
+              ) : <p>共同可核实的系列未观察到变化。</p>}
+              <button type="button" className="text-primary hover:underline" onClick={() => onOpen(change.previous_run_id)}>打开上期快照</button>
+            </div>
+          ) : <p className="mt-2 border-t pt-2 text-xs">当前没有同一店铺、同一栏目可比的历史采样。</p>}
+        </details>
+      )}
     </section>
   )
 }

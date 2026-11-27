@@ -114,6 +114,40 @@ class AmazonStoreProductMatrix(BaseModel):
     new_sections: dict[str, list[str]]
 
 
+class AmazonListingDate(BaseModel):
+    asin: str
+    url: str
+    collected_at: datetime
+    label: Literal["first_available", "release_date"] | None = None
+    date_text: str | None = None
+    problem: str | None = None
+
+
+class AmazonSeriesChange(BaseModel):
+    family_asin: str
+    newly_seen: list[str]
+    no_longer_seen: list[str]
+
+
+class AmazonStoreChange(BaseModel):
+    previous_run_id: UUID
+    previous_collected_at: datetime
+    current_collected_at: datetime
+    section_keys: list[str]
+    newly_seen: list[str]
+    no_longer_seen: list[str]
+    series_changes: list[AmazonSeriesChange]
+
+
+class AmazonStoreLifecycle(BaseModel):
+    colors: dict[str, int]
+    sizes: dict[str, int]
+    missing_color: int
+    missing_size: int
+    dates: list[AmazonListingDate] = Field(default_factory=list)
+    change: AmazonStoreChange | None = None
+
+
 class AmazonEvidence(BaseModel):
     key: str
     kind: Literal["section", "suggestions", "board", "analysis"]
@@ -150,6 +184,7 @@ class AmazonResearchSnapshot(BaseModel):
     asin_sources: dict[str, list[str]] = Field(default_factory=dict)
     product_archive: AmazonStoreArchive | None = None
     product_matrix: AmazonStoreProductMatrix | None = None
+    lifecycle: AmazonStoreLifecycle | None = None
     translation_status: StepStatus = "pending"
     translation_missing: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

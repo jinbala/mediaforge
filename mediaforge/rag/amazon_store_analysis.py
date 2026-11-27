@@ -1,9 +1,10 @@
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from decimal import Decimal
 from itertools import combinations
 from statistics import mean, median
+from uuid import UUID
 
 from mediaforge.models.amazon_research import AmazonResearchReport, AmazonStorePage
 from mediaforge.models.amazon_research_run import (
@@ -15,8 +16,11 @@ from mediaforge.models.amazon_research_run import (
     AmazonResearchSnapshot,
     AmazonSectionMetrics,
     AmazonSectionOverlap,
+    AmazonSeriesChange,
     AmazonStoreArchive,
+    AmazonStoreChange,
     AmazonStoreIdentity,
+    AmazonStoreLifecycle,
     AmazonStoreProductMatrix,
     AmazonStoreSample,
 )
@@ -335,6 +339,77 @@ def build_product_matrix(
             for section in sections
             if section.role == "new"
         },
+    )
+
+
+def _complete_sections(snapshot: AmazonResearchSnapshot) -> dict[str, AmazonEvidence]:
+    return {
+        item.key: item
+        for item in section_samples(snapshot)
+        if item.status in {"success", "empty"} and item.collected_at
+    }
+
+
+def compare_store_samples(
+    current: AmazonResearchSnapshot,
+    history: list[tuple[UUID, AmazonResearchSnapshot]],
+) -> AmazonStoreChange | None:
+    current_pages = _complete_sections(current)
+    for run_id, previous in history:
+        prior_pages = _complete_sections(previous)
+        shared = sorted(current_pages.keys() & prior_pages.keys())
+        if not shared:
+            continue
+
+        def portfolio(pages: dict[str, AmazonEvidence]) -> tuple[set[str], dict[str, set[str]]]:
+            sample = AmazonResearchSnapshot(evidence=[pages[key] for key in shared])
+            products = archive(sample)
+            families = defaultdict(set)
+            for product in products:
+                if product.family_asin and product.has_variants is not False:
+                    families[product.family_asin].add(product.asin)
+            return {item.asin for item in products}, dict(families)
+
+        before, before_families = portfolio(prior_pages)
+        after, after_families = portfolio(current_pages)
+        # 只对双方都能确认的规格组描述样本变化，避免把证据缺失当成产品停产。
+        series = [
+            AmazonSeriesChange(
+                family_asin=family,
+                newly_seen=sorted(after_families[family] - before_families[family]),
+                no_longer_seen=sorted(before_families[family] - after_families[family]),
+            )
+            for family in sorted(before_families.keys() & after_families.keys())
+            if before_families[family] != after_families[family]
+        ]
+        return AmazonStoreChange(
+            previous_run_id=run_id,
+            previous_collected_at=max(prior_pages[key].collected_at for key in shared),
+            current_collected_at=max(current_pages[key].collected_at for key in shared),
+            section_keys=shared,
+            newly_seen=sorted(after - before),
+            no_longer_seen=sorted(before - after),
+            series_changes=series,
+        )
+    return None
+
+
+def build_store_lifecycle(
+    products: list[AmazonStoreSample],
+    change: AmazonStoreChange | None,
+) -> AmazonStoreLifecycle:
+    colors = Counter(product.color for product in products if product.color)
+    sizes = Counter(
+        _SIZE_ALIASES.get(product.size.casefold(), product.size).upper()
+        for product in products
+        if product.size
+    )
+    return AmazonStoreLifecycle(
+        colors=dict(colors),
+        sizes=dict(sizes),
+        missing_color=len(products) - sum(colors.values()),
+        missing_size=len(products) - sum(sizes.values()),
+        change=change,
     )
 
 

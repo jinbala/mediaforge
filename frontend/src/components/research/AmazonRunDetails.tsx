@@ -8,7 +8,7 @@ import {
 } from '@/lib/amazon-research'
 
 const stageLabels: Record<string, string> = {
-  queue: '派发任务', section: '采集店铺栏目', translation: '补充中文字段', report: '生成结果',
+  queue: '派发任务', section: '采集店铺栏目', translation: '补充中文字段', listing_dates: '核对公开上架日期', report: '生成结果',
   boards: '采集类目榜单', 'category-analysis': '生成类目专题',
 }
 const roleLabels: Record<string, string> = {

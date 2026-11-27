@@ -286,3 +286,30 @@ async def checkpoint(
         )
         if not result.rowcount:
             raise ResearchRunConflict("任务已由其他工作进程接管。")
+
+
+async def prior_store_snapshots(
+    run: AmazonResearchRun,
+) -> list[tuple[UUID, AmazonResearchSnapshot]]:
+    # 店铺新品比较只读取同一账号、同一规范店铺的近期已完成快照。
+    canonical = source_key(run.mode, run.snapshot.store_root or run.source)
+    async with get_session() as session:
+        owner = (
+            await session.execute(select(Run.tenant_id, Run.user_id).where(Run.id == run.id))
+        ).one()
+        rows = (
+            await session.execute(
+                select(Run.id, Run.snapshot)
+                .where(
+                    _owner(owner),
+                    Run.canonical_source == canonical,
+                    Run.id != run.id,
+                    Run.created_at < run.created_at,
+                    Run.status.in_(("done", "partial_fail")),
+                    Run.stage == "report",
+                )
+                .order_by(Run.created_at.desc(), Run.id)
+                .limit(3)
+            )
+        ).all()
+    return [(run_id, AmazonResearchSnapshot.model_validate(snapshot)) for run_id, snapshot in rows]

@@ -2,6 +2,7 @@ import asyncio
 import re
 from datetime import UTC, datetime
 from time import monotonic
+from typing import Literal
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
@@ -10,6 +11,7 @@ from bs4 import BeautifulSoup
 from mediaforge.models.amazon_research import AmazonStoreVariant
 from mediaforge.models.amazon_research_run import (
     AmazonEvidence,
+    AmazonListingDate,
     AmazonStoreSample,
     AmazonStoreSampleScope,
 )
@@ -422,3 +424,60 @@ def discover_sections(
             known[key] = section
             added.append(section)
     return added, root, limited
+
+
+def _visible_listing_date(
+    html: bytes,
+) -> tuple[Literal["first_available", "release_date"] | None, str | None]:
+    soup = BeautifulSoup(html, "html.parser", from_encoding="utf-8")
+    if soup.select_one('form[action*="validateCaptcha"], #captchacharacters'):
+        raise AmazonFetchError("Amazon 返回访问验证。", "captcha")
+    labels: dict[str, Literal["first_available", "release_date"]] = {
+        "date first available": "first_available",
+        "release date": "release_date",
+    }
+    found = {}
+    for row in soup.select(
+        "tr, #detailBullets_feature_div li, #detailBulletsWrapper_feature_div li"
+    ):
+        cells = row.find_all(["th", "td"], recursive=False)
+        heading = cells[0] if len(cells) >= 2 else row.select_one(".a-text-bold")
+        heading_text = _text(heading) or ""
+        label = labels.get(
+            heading_text.translate({0x200E: None, 0x200F: None}).strip(" :").casefold()
+        )
+        if not label:
+            continue
+        value = (
+            _text(cells[1]) if len(cells) >= 2 else (_text(row) or "").removeprefix(heading_text)
+        )
+        if not value:
+            continue
+        cleaned = value.translate({0x200E: None, 0x200F: None}).strip(" :")
+        for pattern in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
+            try:
+                datetime.strptime(cleaned, pattern)
+            except ValueError:
+                continue
+            # 保留 Amazon 的原始日期措辞。发布日期和在 Amazon 首次可售日期含义不同。
+            found.setdefault(label, cleaned[:100])
+            break
+    for label in labels.values():
+        if label in found:
+            return label, found[label]
+    return None, None
+
+
+async def collect_listing_date(client: httpx.AsyncClient, asin: str) -> AmazonListingDate:
+    url = normalize_source("product", asin)
+    item = AmazonListingDate(asin=asin, url=url, collected_at=datetime.now(UTC))
+    try:
+        final, html = await _fetch_page(client, "product", url)
+        if final != url:
+            raise AmazonFetchError("商品链接转向其他 ASIN，日期未知。", "asin_redirect")
+        item.label, item.date_text = await asyncio.to_thread(_visible_listing_date, html)
+        if not item.date_text:
+            item.problem = "公开详情未见明确的首次可售日期或发布日期。"
+    except AmazonFetchError as exc:
+        item.problem = str(exc)
+    return item

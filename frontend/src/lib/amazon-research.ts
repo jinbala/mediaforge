@@ -154,6 +154,7 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
   }
   const matrix = run?.snapshot.product_matrix
   if (matrix && run) lines.push(...formatAmazonProductMatrix(run, matrix, escape))
+  if (run?.snapshot.lifecycle) lines.push(...formatAmazonLifecycle(run.snapshot.lifecycle, escape))
   const archive = run?.snapshot.product_archive
   if (archive) {
     lines.push('', '### 商品归档', '', ...amazonArchiveCounts(archive).map(([label, count]) => '- ' + label + ' · ' + count))
@@ -273,6 +274,30 @@ export type AmazonStoreProductMatrix = {
   new_sections: Record<string, string[]>
 }
 
+export type AmazonStoreLifecycle = {
+  colors: Record<string, number>
+  sizes: Record<string, number>
+  missing_color: number
+  missing_size: number
+  dates: {
+    asin: string
+    url: string
+    collected_at: string
+    label: 'first_available' | 'release_date' | null
+    date_text: string | null
+    problem: string | null
+  }[]
+  change: {
+    previous_run_id: string
+    previous_collected_at: string
+    current_collected_at: string
+    section_keys: string[]
+    newly_seen: string[]
+    no_longer_seen: string[]
+    series_changes: { family_asin: string; newly_seen: string[]; no_longer_seen: string[] }[]
+  } | null
+}
+
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
   inputs: { source: string; keyword: string; category?: CategoryInputs | null }
@@ -298,6 +323,7 @@ export type AmazonRun = AmazonRunSummary & {
     asin_sources: Record<string, string[]>
     product_archive?: AmazonStoreArchive | null
     product_matrix?: AmazonStoreProductMatrix | null
+    lifecycle?: AmazonStoreLifecycle | null
   }
 }
 
@@ -439,5 +465,38 @@ function formatAmazonProductMatrix(run: AmazonRun, matrix: AmazonStoreProductMat
     ...(matrix.rating_leaders.length ? matrix.rating_leaders.map((row) => `- [${row.asin}](https://www.amazon.com/dp/${row.asin}) · ${row.count} 个评分 · 同款组 ${row.family_asin ?? '待确认'}`) : ['公开评分数未知。']),
     '', '#### 新品栏目所见样本', '',
     ...(Object.keys(matrix.new_sections).length ? Object.entries(matrix.new_sections).map(([key, asins]) => `- ${section(key)} · ${asins.length} 个 · ${asins.join('、')}`) : ['公开导航中未识别到新品栏目，新品样本未知。']),
+  ]
+}
+
+export function amazonListingDateLabel(item: AmazonStoreLifecycle['dates'][number]) {
+  if (!item.date_text) return item.problem ?? '公开详情日期未知。'
+  return (item.label === 'first_available' ? 'Amazon 首次可售' : '商品发布日期') + ' · ' + item.date_text
+}
+
+export function amazonSampleChangeLabel(change: NonNullable<AmazonStoreLifecycle['change']>) {
+  return `共同可读 ${change.section_keys.length} 栏 · 新观察 ${change.newly_seen.length} 个 ASIN · 未再观察 ${change.no_longer_seen.length} 个 ASIN。`
+}
+
+export const amazonUnknownLaunchCadence = '上新节奏未知。样本变化可能来自公开排序、栏目或覆盖变化。'
+
+function formatAmazonLifecycle(lifecycle: AmazonStoreLifecycle, escape: (text: string) => string) {
+  const entries = (rows: Record<string, number>) => Object.entries(rows).map(([key, count]) => `${escape(key)} ${count} 个`).join('、') || '未知'
+  const change = lifecycle.change
+  return [
+    '', '### 新品节奏与产品线', '',
+    amazonUnknownLaunchCadence,
+    '配色 · ' + entries(lifecycle.colors) + ` · 待确认 ${lifecycle.missing_color} 个 ASIN`,
+    '尺码 · ' + entries(lifecycle.sizes) + ` · 待确认 ${lifecycle.missing_size} 个 ASIN`,
+    ...lifecycle.dates.map((item) => `- [${item.asin}](${item.url}) · ${escape(amazonListingDateLabel(item))} · 采集 ${amazonTime(item.collected_at)}`),
+    ...(!lifecycle.dates.length ? ['公开日期样本未知。'] : []),
+    ...(change ? [
+      `上期任务 ${change.previous_run_id} · ${amazonTime(change.previous_collected_at)} → ${amazonTime(change.current_collected_at)}`,
+      amazonSampleChangeLabel(change),
+      '共同栏目 · ' + change.section_keys.join('、'),
+      '新观察 ASIN · ' + (change.newly_seen.join('、') || '无'),
+      '未再观察 ASIN · ' + (change.no_longer_seen.join('、') || '无'),
+      ...change.series_changes.map((item) => `- 规格组 ${item.family_asin} · 新观察 ${item.newly_seen.join('、') || '无'} · 未再观察 ${item.no_longer_seen.join('、') || '无'}`),
+      ...(!change.series_changes.length ? ['共同可核实的系列未观察到变化。'] : []),
+    ] : ['当前没有同一店铺、同一栏目可比的历史采样。']),
   ]
 }
