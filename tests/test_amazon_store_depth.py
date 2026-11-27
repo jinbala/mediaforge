@@ -18,10 +18,13 @@ from mediaforge.gateway.main import app
 from mediaforge.gateway.middleware.observability import _should_log_body
 from mediaforge.gateway.middleware.rate_limit import limiter
 from mediaforge.gateway.routers import amazon_research as router
+from mediaforge.models.amazon_research import AmazonStoreVariant
+from mediaforge.models.amazon_research_run import AmazonResearchSnapshot, AmazonStoreSample
 from mediaforge.models.tenant import Tenant, TenantPlan
 from mediaforge.models.user import User
 from mediaforge.orchestrator import amazon_research as pipeline
 from mediaforge.rag.amazon_research import AMAZON, amazon_public_client
+from mediaforge.rag.amazon_store_analysis import archive, section_index, summarize_archive
 from mediaforge.rag.amazon_store_collection import collect_evidence, section_step
 
 API = "/api/v1/research/amazon/runs"
@@ -156,6 +159,13 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
         ABOUT: ("empty", "no_products"),
         FAILED: ("failed", "throttled"),
     }
+    summary = snap["product_archive"]
+    assert (summary["asin_count"], summary["family_count"], summary["color_group_count"]) == (
+        3,
+        1,
+        2,
+    )
+    assert summary["unknown_family_count"] == 0
     assert len(snap["asin_sources"][IDS[1]]) == 3
     assert len(first["report"]["listings"]) == 3
     assert sections[HOME]["products"][0]["image_url"].endswith(".jpg")
@@ -321,3 +331,120 @@ async def test_empty_dynamic_or_changed_markup_are_distinct(html, code, status):
 def test_no_request_payload_logging():
     assert not _should_log_body(API)
     assert not _should_log_body(API + "/fixture")
+
+
+def _variant_sample(asin, group, color, size):
+    members = sorted([asin, group])
+    return AmazonStoreSample(
+        asin=asin,
+        url=f"{AMAZON}/dp/{asin}",
+        title="Cotton sample",
+        family_asin=members[0],
+        family_members=members,
+        color=color,
+        color_group_asin=members[0],
+        color_members=members,
+        size=size,
+        size_group_members=members,
+        store_variant=AmazonStoreVariant(
+            group_asin=members[0],
+            title="Cotton sample",
+            color=color,
+            size=size,
+        ),
+    )
+
+
+def test_archive_uses_partial_variant_tables_and_counts_only_observed_ids():
+    first, second, hidden = IDS
+    unknown = "B000000004"
+    standalone = "B000000005"
+    red = "B000000006"
+    left, right = section_step(INITIAL, "Fixture A"), section_step(NEW, "Fixture B")
+    left.products = [
+        _variant_sample(first, hidden, "Blue", "Small"),
+        _variant_sample(red, hidden, "Red", "S"),
+    ]
+    right.products = [
+        _variant_sample(first, hidden, "Blue", "S"),
+        _variant_sample(second, hidden, "Blue", "Medium"),
+        AmazonStoreSample(asin=unknown, url=f"{AMAZON}/dp/{unknown}", title="Cotton sample"),
+        AmazonStoreSample(
+            asin=standalone,
+            url=f"{AMAZON}/dp/{standalone}",
+            title="Cotton sample",
+            has_variants=False,
+        ),
+    ]
+    snapshot = AmazonResearchSnapshot(evidence=[left, right])
+    products = {item.asin: item for item in archive(snapshot)}
+    summary = summarize_archive(list(products.values()))
+    assert (summary.asin_count, summary.family_count, summary.color_group_count) == (5, 2, 2)
+    assert hidden not in summary.identities
+    assert summary.unknown_family_count == 1
+    assert summary.unknown_color_count == summary.unknown_size_count == 2
+    left_blue, right_blue = products[first], products[second]
+    assert left_blue.store_variant.group_asin == right_blue.store_variant.group_asin
+    assert left_blue.color_group_asin == right_blue.color_group_asin
+    assert products[red].color_group_asin != left_blue.color_group_asin
+    assert products[red].store_variant.group_asin != left_blue.store_variant.group_asin
+    assert summary.identities[standalone].standalone
+    assert summary.identities[unknown].family_asin is None
+    assert section_index(snapshot)[first] == [left.key, right.key]
+
+
+def test_conflicting_color_is_excluded_from_size_fold():
+    first, second, hidden = IDS
+    left, right = section_step(INITIAL, "Fixture A"), section_step(NEW, "Fixture B")
+    left.products = [
+        _variant_sample(first, hidden, "Blue", "S"),
+        _variant_sample(second, hidden, "Blue", "M"),
+    ]
+    right.products = [_variant_sample(first, hidden, "Red", "Small")]
+    products = {item.asin: item for item in archive(AmazonResearchSnapshot(evidence=[left, right]))}
+    assert products[first].family_asin == products[second].family_asin
+    assert products[first].color_group_asin is None
+    assert products[first].store_variant is None
+    assert products[first].size == "S"
+    assert products[second].color_group_asin is not None
+
+
+@respx.mock
+async def test_archives_saved_before_the_new_summary_open_without_refetching(api):
+    client, _, _, _, maker = api
+    respx.get(INITIAL).respond(200, text=_cards(IDS[0], IDS[1]))
+    started = await client.post(API, json={"mode": "store", "source": INITIAL})
+    run_id = started.json()["id"]
+    current = await _run_submitted(client, run_id)
+    legacy = current["snapshot"]
+    legacy.pop("product_archive")
+    for section in legacy["evidence"]:
+        for item in section["products"]:
+            for key in ("has_variants", "family_members", "color_members", "size_group_members"):
+                item.pop(key)
+    async with maker.begin() as session:
+        await session.execute(
+            update(AmazonResearchRunTable)
+            .where(AmazonResearchRunTable.id == UUID(run_id))
+            .values(snapshot=legacy)
+        )
+    reopened = (await client.get(f"{API}/{run_id}")).json()
+    assert reopened["report"]["collected_at"] == current["report"]["collected_at"]
+    assert reopened["report"]["listings"] == current["report"]["listings"]
+    assert reopened["snapshot"]["product_archive"]["asin_count"] == 2
+    assert reopened["snapshot"]["product_archive"]["family_count"] == 1
+    assert len(respx.calls) == 1
+
+
+def test_merge_does_not_mutate_the_source_variant():
+    first, second, hidden = IDS
+    original = _variant_sample(second, hidden, "Blue", "M")
+    left, right = section_step(INITIAL, "Fixture A"), section_step(NEW, "Fixture B")
+    left.products = [
+        AmazonStoreSample(asin=second, url=f"{AMAZON}/dp/{second}", title="Cotton sample"),
+        _variant_sample(first, hidden, "Blue", "S"),
+    ]
+    right.products = [original]
+    merged = {item.asin: item for item in archive(AmazonResearchSnapshot(evidence=[left, right]))}
+    assert merged[second].store_variant.group_asin == first
+    assert original.store_variant.group_asin == second

@@ -97,7 +97,7 @@ export function groupAmazonListings(items: AmazonListing[], mode: ResearchMode) 
   return [...groups.values()]
 }
 
-export function formatAmazonReport(report: AmazonReport, brief: string) {
+export function formatAmazonReport(report: AmazonReport, brief: string, run?: AmazonRun | null) {
   // 将外部标题和评论中的 Markdown 符号转义，中文译名与原名一起导出。
   const escape = (value: string) => value.replace(/[\\*_#<>\[\]\x60!|~]/g, '\\$&')
   const bilingual = ({ title, title_zh }: { title: string; title_zh?: string | null }) =>
@@ -137,11 +137,22 @@ export function formatAmazonReport(report: AmazonReport, brief: string) {
     }
     if (brief.trim()) lines.push('', '### 图片需求', brief.split(/\r?\n/).map(escape).join('\n\n'))
   }
+  const archive = run?.snapshot.product_archive
+  if (archive) {
+    lines.push('', '### 商品归档', '', ...amazonArchiveCounts(archive).map(([label, count]) => '- ' + label + ' · ' + count))
+    lines.push('', amazonArchiveCoverage(archive))
+  }
   if (report.listings.length) {
     // 下载报告逐条保留原始商品样本和链接，便于按 ASIN 查找每个尺码。
     lines.push('', '### 商品样本', ...report.listings.map((item) => {
       const facts = [item.rank, item.asin, item.price, item.rating && item.rating + ' 星', item.rating_count && item.rating_count + ' 个评分']
-      return '- [' + bilingual(item) + '](' + item.url + ') · ' + facts.filter(Boolean).map((fact) => escape(String(fact))).join(' · ')
+      const main = '- [' + bilingual(item) + '](' + item.url + ') · ' + facts.filter(Boolean).map((fact) => escape(String(fact))).join(' · ')
+      const identity = archive?.identities[item.asin]
+      if (!identity || !run) return main
+      const sources = amazonListingSources(run, item.asin)
+      return [main, '  - ' + escape(amazonIdentityLabel(identity)),
+        ...sources.map((source) => '  - 栏目来源 [' + bilingual(source) + '](' + (source.final_url ?? source.url) + ')'),
+      ].join('\n')
     }))
   }
   if (report.store_pages.length) {
@@ -190,6 +201,24 @@ export type AmazonEvidence = {
   excerpt: string | null
   products: (AmazonListing & { price_currency: string | null })[]
 }
+type AmazonStoreIdentity = {
+  family_asin: string | null
+  color_group_asin: string | null
+  color: string | null
+  size: string | null
+  standalone: boolean
+}
+
+type AmazonStoreArchive = {
+  asin_count: number
+  family_count: number
+  color_group_count: number
+  unknown_family_count: number
+  unknown_color_count: number
+  unknown_size_count: number
+  identities: Record<string, AmazonStoreIdentity>
+}
+
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
   inputs: { source: string; keyword: string }
@@ -206,6 +235,7 @@ export type AmazonRun = AmazonRunSummary & {
     notes: string[]
     evidence: AmazonEvidence[]
     asin_sources: Record<string, string[]>
+    product_archive?: AmazonStoreArchive | null
   }
 }
 
@@ -232,4 +262,29 @@ export function downloadAmazonFile(contents: string, filename: string, type = 't
   anchor.download = filename
   anchor.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+export function amazonListingSources(run: AmazonRun, asin: string) {
+  const keys = new Set(run.snapshot.asin_sources[asin] ?? [])
+  return run.snapshot.evidence.filter((item) => keys.has(item.key))
+}
+
+export function amazonArchiveCounts(archive: AmazonStoreArchive) {
+  return [
+    ['去重 ASIN', archive.asin_count],
+    ['已确认款式（含独立款）', archive.family_count],
+    ['已确认配色组', archive.color_group_count],
+  ] as const
+}
+
+export function amazonArchiveCoverage(archive: AmazonStoreArchive) {
+  return `待确认的 ASIN · 同款 ${archive.unknown_family_count} 个，配色 ${archive.unknown_color_count} 个，尺码 ${archive.unknown_size_count} 个。`
+}
+
+export function amazonIdentityLabel(identity: AmazonStoreIdentity) {
+  const family = identity.standalone ? '独立款' : '同款组 ' + (identity.family_asin ?? '待确认')
+  const color = identity.color_group_asin
+    ? '配色组 ' + identity.color_group_asin + (identity.color ? '（' + identity.color + '）' : '')
+    : '配色归属待确认'
+  return [family, color, '尺码 ' + (identity.size ?? '待确认')].join(' · ')
 }

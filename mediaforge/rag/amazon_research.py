@@ -300,6 +300,8 @@ def _store_product_cards(soup: BeautifulSoup) -> dict[str, dict]:
                 asin = product.get("asin")
                 if isinstance(asin, str) and ASIN.fullmatch(asin):
                     card = by_asin.setdefault(asin.upper(), {})
+                    if type(has_variants := product.get("hasVariations")) is bool:
+                        card.setdefault("hasVariations", has_variants)
                     for field in (
                         "productImages", "title", "twisterVariations", "price",
                         "starRating", "customerReviews", "reviews", "priceToPay",
@@ -318,7 +320,8 @@ def _variant_coordinates(card: dict) -> tuple[list, list, dict] | None:
     values = twister.get("dimensionValues")
     variations = twister.get("variations")
     if not (
-        isinstance(dimensions, list) and isinstance(values, list) and len(dimensions) == len(values)
+        isinstance(dimensions, list) and dimensions
+        and isinstance(values, list) and len(dimensions) == len(values)
         and isinstance(variations, list)
     ):
         return None
@@ -329,6 +332,7 @@ def _variant_coordinates(card: dict) -> tuple[list, list, dict] | None:
     ]
     # 每个 ASIN 的 choices 是各规格维度的选项下标，例如 [颜色下标, 尺码下标]。
     coordinates = {}
+    conflicts = set()
     for variant in variations:
         if not isinstance(variant, dict):
             continue
@@ -342,7 +346,12 @@ def _variant_coordinates(card: dict) -> tuple[list, list, dict] | None:
                 for options, index in zip(values, choices, strict=True)
             )
         ):
-            coordinates[variant_asin.upper()] = choices
+            key = variant_asin.upper()
+            if key in coordinates and coordinates[key] != choices:
+                conflicts.add(key)
+            coordinates[key] = choices
+    for key in conflicts:
+        del coordinates[key]
     return symbols, values, coordinates
 
 

@@ -28,6 +28,7 @@ from mediaforge.rag.amazon_research import (
 
 SECTION_LIMIT = 30
 SECTION_ASIN_LIMIT = 30
+VARIANT_PROOF_LIMIT = 100
 FETCH_CONCURRENCY = 3
 MAX_ATTEMPTS = 2
 
@@ -165,6 +166,7 @@ def _section_products(soup: BeautifulSoup) -> list[AmazonStoreSample]:
             if listing.title == listing.asin and isinstance(title, str) and title.strip()
             else listing.title,
             price=price,
+            has_variants=card.get("hasVariations"),
             price_currency=currency,
             price_label=price_label,
             product_type=_string(_record(card, "productCategory"), "productType"),
@@ -177,21 +179,34 @@ def _section_products(soup: BeautifulSoup) -> list[AmazonStoreSample]:
             choices := specs[2].get(listing.asin)
         ) is not None:
             symbols, values, coordinates = specs
+            # 有限保留规格表中的关联 ID，以便跨栏目核对部分重叠的规格表。
+            # 只有栏目中实际采到的 ASIN 进入商品计数。
             if len(coordinates) > 1:
-                # 用同一公开规格表归并款式，缺少可核查关系的 ASIN 留空。
-                sample.family_asin = min(coordinates)
-                for symbol, field in (("color_name", "color"), ("size_name", "size")):
-                    if symbols.count(symbol) == 1:
-                        index = symbols.index(symbol)
-                        setattr(sample, field, values[index][choices[index]].strip()[:160])
-                if sample.color:
-                    index = symbols.index("color_name")
-                    sample.color_group_asin = min(
-                        asin for asin, row in coordinates.items() if row[index] == choices[index]
-                    )
-                if sample.store_variant is None and sample.size:
+                sample.family_members = sorted(coordinates)[:VARIANT_PROOF_LIMIT]
+                sample.family_asin = sample.family_members[0]
+            for symbol, field in (("color_name", "color"), ("size_name", "size")):
+                if symbols.count(symbol) == 1:
+                    index = symbols.index(symbol)
+                    setattr(sample, field, values[index][choices[index]].strip()[:160])
+            if sample.color:
+                index = symbols.index("color_name")
+                members = [
+                    asin for asin, row in coordinates.items() if row[index] == choices[index]
+                ]
+                sample.color_members = sorted(members)[:VARIANT_PROOF_LIMIT]
+                sample.color_group_asin = sample.color_members[0]
+            if sample.size:
+                index = symbols.index("size_name")
+                signature = choices[:index] + choices[index + 1 :]
+                fixed = [
+                    asin
+                    for asin, row in coordinates.items()
+                    if row[:index] + row[index + 1 :] == signature
+                ]
+                sample.size_group_members = sorted(fixed)[:VARIANT_PROOF_LIMIT]
+                if sample.store_variant is None:
                     sample.store_variant = AmazonStoreVariant(
-                        group_asin=listing.asin,
+                        group_asin=sample.size_group_members[0],
                         size=sample.size,
                         color=sample.color,
                         title=title.strip()[:500]

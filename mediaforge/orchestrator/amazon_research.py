@@ -9,7 +9,12 @@ from loguru import logger
 from mediaforge.db import amazon_research_store as store
 from mediaforge.models.amazon_research_run import AmazonEvidence, AmazonResearchRun
 from mediaforge.rag.amazon_research import SUGGESTIONS, _fetch_suggestions, amazon_public_client
-from mediaforge.rag.amazon_store_analysis import section_index, store_public_report
+from mediaforge.rag.amazon_store_analysis import (
+    archive,
+    section_index,
+    store_public_report,
+    summarize_archive,
+)
 from mediaforge.rag.amazon_store_collection import (
     FETCH_CONCURRENCY,
     SECTION_ASIN_LIMIT,
@@ -24,7 +29,9 @@ from mediaforge.rag.amazon_store_translation import localize_research_fields
 
 def _update_report(run: AmazonResearchRun) -> None:
     run.snapshot.asin_sources = section_index(run.snapshot)
-    run.report = store_public_report(run.inputs, run.snapshot, run.created_at)
+    listings = archive(run.snapshot)
+    run.snapshot.product_archive = summarize_archive(listings)
+    run.report = store_public_report(run.inputs, run.snapshot, run.created_at, listings)
 
 
 async def _collect_sections(client: httpx.AsyncClient, run: AmazonResearchRun, token: UUID) -> None:

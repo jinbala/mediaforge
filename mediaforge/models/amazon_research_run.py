@@ -26,6 +26,10 @@ class AmazonStoreSample(AmazonListing):
     # 店铺卡片价格保留原表示、显示币种与口径，供后续报告复核。
     family_asin: str | None = None
     color_group_asin: str | None = None
+    has_variants: bool | None = None
+    family_members: list[str] = Field(default_factory=list)
+    color_members: list[str] = Field(default_factory=list)
+    size_group_members: list[str] = Field(default_factory=list)
     product_type: str | None = None
     price_currency: str | None = None
     price_label: str | None = None
@@ -33,6 +37,24 @@ class AmazonStoreSample(AmazonListing):
     size: str | None = None
     brand: str | None = None
     store_url: str | None = None
+
+
+class AmazonStoreIdentity(BaseModel):
+    family_asin: str | None = None
+    color_group_asin: str | None = None
+    color: str | None = None
+    size: str | None = None
+    standalone: bool = False
+
+
+class AmazonStoreArchive(BaseModel):
+    asin_count: int
+    family_count: int
+    color_group_count: int
+    unknown_family_count: int
+    unknown_color_count: int
+    unknown_size_count: int
+    identities: dict[str, AmazonStoreIdentity]
 
 
 class AmazonEvidence(BaseModel):
@@ -66,6 +88,7 @@ class AmazonResearchSnapshot(BaseModel):
     store_root: str | None = None
     evidence: list[AmazonEvidence] = Field(default_factory=list)
     asin_sources: dict[str, list[str]] = Field(default_factory=dict)
+    product_archive: AmazonStoreArchive | None = None
     translation_status: StepStatus = "pending"
     translation_missing: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

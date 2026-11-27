@@ -31,7 +31,11 @@ import {
   AMAZON_BRIEF_LIMIT,
   AMAZON_BRIEF_PARAM,
   activeAmazonRun,
+  amazonArchiveCounts,
+  amazonArchiveCoverage,
   amazonHistoryKey,
+  amazonIdentityLabel,
+  amazonListingSources,
   amazonRunLabels,
   amazonTime,
   downloadAmazonFile,
@@ -95,9 +99,7 @@ function listingSize(item: AmazonListing) {
 
 function ListingSources({ asin, run }: { asin: string; run: AmazonRun | null }) {
   if (!run) return null
-  const sources = new Set(run.snapshot.asin_sources[asin] ?? [])
-  sources.add('product-' + asin)
-  const evidence = run.snapshot.evidence.filter((item) => sources.has(item.key))
+  const evidence = amazonListingSources(run, asin)
   if (!evidence.length) return null
   return (
     <div className="mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
@@ -108,6 +110,12 @@ function ListingSources({ asin, run }: { asin: string; run: AmazonRun | null }) 
       ))}
     </div>
   )
+}
+
+function StoreIdentity({ asin, run }: { asin: string; run: AmazonRun | null }) {
+  const identity = run?.snapshot.product_archive?.identities[asin]
+  if (!identity) return null
+  return <p className="mt-0.5 text-xs text-muted-foreground">{amazonIdentityLabel(identity)}</p>
 }
 
 function StoreSizeGroup({ items, loading, run, onResearch }: {
@@ -150,7 +158,10 @@ function StoreSizeGroup({ items, loading, run, onResearch }: {
                 <span className="font-mono text-xs text-muted-foreground">{item.asin}</span>
                 <ExternalLink aria-hidden="true" className="size-3" />
               </a>
-              <ListingSources asin={item.asin} run={run} />
+              <div>
+                <StoreIdentity asin={item.asin} run={run} />
+                <ListingSources asin={item.asin} run={run} />
+              </div>
               <Button variant="ghost" size="sm" disabled={loading} aria-label={'调研 ' + item.asin} onClick={() => onResearch(item.url)}>
                 调研<ArrowRight aria-hidden="true" />
               </Button>
@@ -207,6 +218,7 @@ function Listings({ items, groups, ranked, loading, run, onResearch }: {
                     {item.title !== item.asin && <span className="mt-0.5 block font-mono text-xs text-muted-foreground">{item.asin}</span>}
                   </span>
                 </a>
+                <StoreIdentity asin={item.asin} run={run} />
                 <ListingSources asin={item.asin} run={run} />
               </td>
               {showStats && (
@@ -404,7 +416,7 @@ export default function ResearchPage() {
 
   function downloadReport(currentReport: AmazonReport) {
     downloadAmazonFile(
-      formatAmazonReport(currentReport, brief),
+      formatAmazonReport(currentReport, brief, run),
       'amazon-research-' + (currentReport.product?.asin ?? currentReport.mode) + '.md',
     )
   }
@@ -423,6 +435,7 @@ export default function ResearchPage() {
   const product = report?.product
   const storeUrl = product?.store_url
   const listingGroups = report ? groupAmazonListings(report.listings, report.mode) : []
+  const productArchive = run?.snapshot.product_archive
 
   return (
     <div className="mx-auto max-w-[1180px] space-y-6">
@@ -651,14 +664,27 @@ export default function ResearchPage() {
             </>
           )}
 
-          {report.listings.length > 0 && (
+          {(report.listings.length > 0 || productArchive) && (
             <section className="rounded-lg border bg-card">
               <h3 className="px-4 pt-4 font-medium">
-                商品样本 · {listingGroups.length < report.listings.length
+                {productArchive ? '商品归档' : '商品样本 · ' + (listingGroups.length < report.listings.length
                   ? `${listingGroups.length} 组 · ${report.listings.length} 个 ASIN`
-                  : `${report.listings.length} 件`}
+                  : `${report.listings.length} 件`)}
               </h3>
-              <Listings items={report.listings} groups={listingGroups} ranked={report.mode === 'bestsellers'} loading={loading} run={run} onResearch={(url) => openRelated('product', url)} />
+              {productArchive && (
+                <div className="space-y-2 px-4 py-3">
+                  <dl className="flex flex-wrap gap-x-6 gap-y-2" aria-label="商品归档计数">
+                    {amazonArchiveCounts(productArchive).map(([label, count]) => (
+                      <div key={label}>
+                        <dt className="text-xs text-muted-foreground">{label}</dt>
+                        <dd className="text-base font-medium tabular-nums">{count}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <p className="text-xs text-muted-foreground">{amazonArchiveCoverage(productArchive)}</p>
+                </div>
+              )}
+              {report.listings.length > 0 && <Listings items={report.listings} groups={listingGroups} ranked={report.mode === 'bestsellers'} loading={loading} run={run} onResearch={(url) => openRelated('product', url)} />}
             </section>
           )}
 

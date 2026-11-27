@@ -16,6 +16,7 @@ from mediaforge.models.amazon_research_run import (
     AmazonResearchSnapshot,
     RetryTarget,
 )
+from mediaforge.rag.amazon_store_analysis import archive, summarize_archive
 from mediaforge.rag.amazon_store_collection import page_id
 
 LEASE = timedelta(seconds=120)
@@ -66,6 +67,10 @@ def _summary(row: Run) -> AmazonResearchRunSummary:
 
 def _view(row: Run) -> AmazonResearchRun:
     data = _summary(row)
+    snapshot = AmazonResearchSnapshot.model_validate(row.snapshot)
+    if snapshot.product_archive is None and snapshot.evidence:
+        # 兼容早期已保存的栏目，以当时的原始样本补算，采集时间保持原值。
+        snapshot.product_archive = summarize_archive(archive(snapshot))
     return AmazonResearchRun(
         **data.model_dump(),
         inputs=AmazonResearchRunRequest.model_validate(row.inputs),
@@ -73,7 +78,7 @@ def _view(row: Run) -> AmazonResearchRun:
         if data.status == "interrupted"
         else row.error,
         report=AmazonResearchReport.model_validate(row.report) if row.report else None,
-        snapshot=AmazonResearchSnapshot.model_validate(row.snapshot),
+        snapshot=snapshot,
     )
 
 
