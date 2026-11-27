@@ -23,6 +23,7 @@ from mediaforge.models.amazon_research_run import AmazonResearchSnapshot, Amazon
 from mediaforge.models.tenant import Tenant, TenantPlan
 from mediaforge.models.user import User
 from mediaforge.orchestrator import amazon_research as pipeline
+from mediaforge.rag import amazon_store_collection
 from mediaforge.rag.amazon_research import AMAZON, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import archive, section_index, summarize_archive
 from mediaforge.rag.amazon_store_collection import collect_evidence, section_step
@@ -149,6 +150,12 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
     first = await _run_submitted(client, id)
     assert first["status"] == "partial_fail", first.get("error")
     snap = first["snapshot"]
+    assert snap["store_scope"] == {
+        "section_limit": 30,
+        "asin_limit_per_section": 30,
+        "navigation_truncated": False,
+    }
+
     assert snap["store_root"] == HOME
     assert first["canonical_source"].endswith(HOME.rsplit("/", 1)[-1])
     sections = {page["url"]: page for page in snap["evidence"] if page["kind"] == "section"}
@@ -418,6 +425,7 @@ async def test_archives_saved_before_the_new_summary_open_without_refetching(api
     current = await _run_submitted(client, run_id)
     legacy = current["snapshot"]
     legacy.pop("product_archive")
+    legacy.pop("store_scope")
     for section in legacy["evidence"]:
         for item in section["products"]:
             for key in ("has_variants", "family_members", "color_members", "size_group_members"):
@@ -429,6 +437,7 @@ async def test_archives_saved_before_the_new_summary_open_without_refetching(api
             .values(snapshot=legacy)
         )
     reopened = (await client.get(f"{API}/{run_id}")).json()
+    assert reopened["snapshot"]["store_scope"] is None
     assert reopened["report"]["collected_at"] == current["report"]["collected_at"]
     assert reopened["report"]["listings"] == current["report"]["listings"]
     assert reopened["snapshot"]["product_archive"]["asin_count"] == 2
@@ -448,3 +457,32 @@ def test_merge_does_not_mutate_the_source_variant():
     merged = {item.asin: item for item in archive(AmazonResearchSnapshot(evidence=[left, right]))}
     assert merged[second].store_variant.group_asin == first
     assert original.store_variant.group_asin == second
+
+
+@respx.mock
+async def test_run_saves_applied_sampling_limits_and_preserves_page_fields(api, monkeypatch):
+    client, _, _, _, _ = api
+    monkeypatch.setattr(amazon_store_collection, "SECTION_LIMIT", 2)
+    monkeypatch.setattr(pipeline, "SECTION_LIMIT", 2)
+    respx.get(INITIAL).respond(
+        200,
+        text=_cards(IDS[0]) + _nav(("Collection", NEW), ("About us", ABOUT)),
+    )
+    respx.get(NEW).respond(200, text=_cards(IDS[1]))
+    response = await client.post(API, json={"mode": "store", "source": INITIAL})
+    result = await _run_submitted(client, response.json()["id"])
+    snapshot = result["snapshot"]
+    assert snapshot["store_scope"] == {
+        "section_limit": 2,
+        "asin_limit_per_section": 30,
+        "navigation_truncated": True,
+    }
+    assert len(snapshot["evidence"]) == 2
+    for index, section in enumerate(snapshot["evidence"]):
+        assert section["collected_at"] and section["url"] and section["method"]
+        assert section["observed_count"] == 1
+        item = section["products"][0]
+        assert item["asin"] == IDS[index]
+        assert item["url"].endswith(IDS[index]) and item["image_url"].endswith(IDS[index] + ".jpg")
+        assert item["price"] is None and item["rating"] is None and item["rating_count"] is None
+        assert item["store_variant"]["size"] == ("S" if index == 0 else "M")

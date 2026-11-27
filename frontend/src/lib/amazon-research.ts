@@ -199,7 +199,14 @@ export type AmazonEvidence = {
   observed_count: number | null
   role: string | null
   excerpt: string | null
-  products: (AmazonListing & { price_currency: string | null })[]
+  products: (AmazonListing & {
+    price_currency: string | null
+    price_label?: string | null
+    family_asin?: string | null
+    color_group_asin?: string | null
+    color?: string | null
+    size?: string | null
+  })[]
 }
 type AmazonStoreIdentity = {
   family_asin: string | null
@@ -230,6 +237,11 @@ export type AmazonRun = AmazonRunSummary & {
     source_language: string
     report_language: string
     store_root: string | null
+    store_scope?: {
+      section_limit: number
+      asin_limit_per_section: number
+      navigation_truncated: boolean | null
+    } | null
     translation_status: AmazonStepStatus
     translation_missing: string[]
     notes: string[]
@@ -287,4 +299,46 @@ export function amazonIdentityLabel(identity: AmazonStoreIdentity) {
     ? '配色组 ' + identity.color_group_asin + (identity.color ? '（' + identity.color + '）' : '')
     : '配色归属待确认'
   return [family, color, '尺码 ' + (identity.size ?? '待确认')].join(' · ')
+}
+
+export function amazonEvidenceSampleId(sectionKey: string, asin: string) {
+  return `evidence-${sectionKey}-${asin}`
+}
+
+export function amazonArchiveSampleId(asin: string) {
+  return `archive-${asin}`
+}
+
+export function revealAmazonSample(id: string) {
+  // 先展开对应的栏目或尺码组，浏览器才能滚动到具体 ASIN。
+  const details = document.getElementById(id)?.closest('details')
+  if (details) details.open = true
+}
+
+export function amazonCollectionRange(run: AmazonRun) {
+  const sections = run.snapshot.evidence.filter((item) => item.kind === 'section')
+  const status: Record<AmazonStepStatus, number> = {
+    pending: 0, success: 0, empty: 0, incomplete: 0, failed: 0,
+  }
+  for (const section of sections) status[section.status]++
+  return {
+    section_count: sections.length,
+    section_status_counts: status,
+    raw_card_count: sections.reduce((total, section) => total + section.products.length, 0),
+    unique_asin_count: Object.keys(run.snapshot.asin_sources).length,
+  }
+}
+
+export function formatAmazonStoreSamples(run: AmazonRun) {
+  // 导出同一个服务端快照，保留各栏目的原始价格、评分、链接及缺值。
+  return JSON.stringify({
+    task_id: run.id,
+    source: run.source,
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    status: run.status,
+    attempt: run.attempt,
+    collection_range: amazonCollectionRange(run),
+    ...run.snapshot,
+  }, null, 2) + '\n'
 }

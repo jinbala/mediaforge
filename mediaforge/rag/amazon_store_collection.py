@@ -8,7 +8,11 @@ import httpx
 from bs4 import BeautifulSoup
 
 from mediaforge.models.amazon_research import AmazonStoreVariant
-from mediaforge.models.amazon_research_run import AmazonEvidence, AmazonStoreSample
+from mediaforge.models.amazon_research_run import (
+    AmazonEvidence,
+    AmazonStoreSample,
+    AmazonStoreSampleScope,
+)
 from mediaforge.rag.amazon_research import (
     AMAZON,
     AmazonFetchError,
@@ -141,10 +145,10 @@ def _store_card_price(card: dict) -> tuple[str | None, str | None, str | None]:
     return raw, _currency(raw), "栏目卡片价格" if raw else None
 
 
-def _section_products(soup: BeautifulSoup) -> list[AmazonStoreSample]:
+def _section_products(soup: BeautifulSoup, limit: int) -> list[AmazonStoreSample]:
     cards = _store_product_cards(soup)
     samples = []
-    for listing in _parse_listings(soup, "store", limit=SECTION_ASIN_LIMIT + 1, store_cards=cards):
+    for listing in _parse_listings(soup, "store", limit=limit + 1, store_cards=cards):
         card = cards.get(listing.asin, {})
         title = card.get("title", {}).get("displayString")
         price, currency, price_label = _store_card_price(card)
@@ -217,7 +221,11 @@ def _section_products(soup: BeautifulSoup) -> list[AmazonStoreSample]:
     return samples
 
 
-def _parse_section(soup: BeautifulSoup, item: AmazonEvidence) -> None:
+def _parse_section(
+    soup: BeautifulSoup,
+    item: AmazonEvidence,
+    scope: AmazonStoreSampleScope,
+) -> None:
     url = item.final_url or item.url
     current_slug = _slug(url) or _slug(item.url)
     title = _first_text(soup, "title", "h1")
@@ -231,7 +239,7 @@ def _parse_section(soup: BeautifulSoup, item: AmazonEvidence) -> None:
     navigation = soup.select_one('nav[aria-label*="Navigation Bar"]') or soup.select_one("nav")
     item.links = [
         (page.title, page.url)
-        for page in _store_pages(navigation or soup, url, limit=SECTION_LIMIT + 1)
+        for page in _store_pages(navigation or soup, url, limit=scope.section_limit + 1)
         if not current_slug or _slug(page.url) in {None, current_slug}
     ]
     # 当前页在旧导航解析中被省略。以公开头部品牌标记或导航中的 Home 项确认首页。
@@ -261,8 +269,8 @@ def _parse_section(soup: BeautifulSoup, item: AmazonEvidence) -> None:
         except AmazonSourceError:
             pass
 
-    candidates = _section_products(soup)
-    item.products = candidates[:SECTION_ASIN_LIMIT]
+    candidates = _section_products(soup, scope.asin_limit_per_section)
+    item.products = candidates[: scope.asin_limit_per_section]
     item.observed_count = len(item.products)
     if item.role == "about":
         item.excerpt = _text(soup.select_one(_STOREFRONT), 240)
@@ -276,9 +284,9 @@ def _parse_section(soup: BeautifulSoup, item: AmazonEvidence) -> None:
             re.I,
         )
     )
-    if len(candidates) > SECTION_ASIN_LIMIT:
+    if len(candidates) > scope.asin_limit_per_section:
         item.status, item.code = "incomplete", "sample_limit"
-        item.reason = f"已保留前 {SECTION_ASIN_LIMIT} 个 ASIN，页面完整数量未知。"
+        item.reason = f"已保留前 {scope.asin_limit_per_section} 个 ASIN，页面完整数量未知。"
     elif item.products:
         item.status = "success"
     elif empty_message or item.role in {"home", "about"} and (item.links or item.excerpt):
@@ -307,13 +315,17 @@ def _parse_section(soup: BeautifulSoup, item: AmazonEvidence) -> None:
         )
 
 
-def _parse_evidence(item: AmazonEvidence, html: bytes) -> None:
+def _parse_evidence(
+    item: AmazonEvidence,
+    html: bytes,
+    scope: AmazonStoreSampleScope,
+) -> None:
     soup = BeautifulSoup(html, "html.parser", from_encoding="utf-8")
     if soup.select_one('form[action*="validateCaptcha"], #captchacharacters') or soup.find(
         string=re.compile(r"Sorry, we just need to make sure you.re not a robot", re.I),
     ):
         raise AmazonFetchError("Amazon 返回了访问验证。", "captcha", item.final_url)
-    _parse_section(soup, item)
+    _parse_section(soup, item, scope)
 
 
 async def collect_evidence(
@@ -321,7 +333,12 @@ async def collect_evidence(
     original: AmazonEvidence,
     *,
     expected_root: str | None = None,
+    scope: AmazonStoreSampleScope | None = None,
 ) -> AmazonEvidence:
+    scope = scope or AmazonStoreSampleScope(
+        section_limit=SECTION_LIMIT,
+        asin_limit_per_section=SECTION_ASIN_LIMIT,
+    )
     item = original.model_copy(
         update={
             "products": [],
@@ -340,7 +357,7 @@ async def collect_evidence(
         item.collected_at = datetime.now(UTC)
         try:
             item.final_url, html = await _fetch_page(client, "store", item.url)
-            await asyncio.to_thread(_parse_evidence, item, html)
+            await asyncio.to_thread(_parse_evidence, item, html, scope)
             if item.home_url and expected_root and page_id(item.home_url) != page_id(expected_root):
                 # 同一美国站也会链接其他品牌。确认不同首页后不把对方商品纳入本店。
                 item.status, item.code = "failed", "store_mismatch"
@@ -361,6 +378,7 @@ async def collect_evidence(
 def discover_sections(
     steps: list[AmazonEvidence],
     root: str | None,
+    limit: int,
 ) -> tuple[list[AmazonEvidence], str | None, bool]:
     # 从输入页和已确认栏目继续发现导航，使用栏目 UUID 去掉带品牌名和不带品牌名的别名。
     known = {page_id(item.url): item for item in steps}
@@ -392,7 +410,7 @@ def discover_sections(
                 continue
             if role == "home":
                 root = root or url
-            if len(steps) + len(added) >= SECTION_LIMIT:
+            if len(steps) + len(added) >= limit:
                 limited = True
                 continue
             section = section_step(url, title, role)

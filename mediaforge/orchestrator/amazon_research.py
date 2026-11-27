@@ -7,7 +7,11 @@ import httpx
 from loguru import logger
 
 from mediaforge.db import amazon_research_store as store
-from mediaforge.models.amazon_research_run import AmazonEvidence, AmazonResearchRun
+from mediaforge.models.amazon_research_run import (
+    AmazonEvidence,
+    AmazonResearchRun,
+    AmazonStoreSampleScope,
+)
 from mediaforge.rag.amazon_research import SUGGESTIONS, _fetch_suggestions, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import (
     archive,
@@ -43,7 +47,12 @@ async def _collect_sections(client: httpx.AsyncClient, run: AmazonResearchRun, t
 
     async def collect(item: AmazonEvidence) -> AmazonEvidence:
         async with semaphore:
-            return await collect_evidence(client, item, expected_root=snapshot.store_root)
+            return await collect_evidence(
+                client,
+                item,
+                expected_root=snapshot.store_root,
+                scope=snapshot.store_scope,
+            )
 
     tasks = [asyncio.create_task(collect(item)) for item in pending]
     try:
@@ -119,6 +128,12 @@ async def _collect_suggestions(client: httpx.AsyncClient, run: AmazonResearchRun
 
 async def _collect_store(run: AmazonResearchRun, token: UUID) -> bool:
     snapshot = run.snapshot
+    if snapshot.store_scope is None:
+        # 保存任务当时的样本边界，之后导出历史时无需以当前配置猜测。
+        snapshot.store_scope = AmazonStoreSampleScope(
+            section_limit=SECTION_LIMIT,
+            asin_limit_per_section=SECTION_ASIN_LIMIT,
+        )
     if not snapshot.evidence:
         snapshot.evidence.append(section_step(run.source, "提交的店铺或栏目"))
         await store.checkpoint(run, token, "section")
@@ -126,7 +141,13 @@ async def _collect_store(run: AmazonResearchRun, token: UUID) -> bool:
         while True:
             await _collect_sections(client, run, token)
             sections = [item for item in snapshot.evidence if item.kind == "section"]
-            added, snapshot.store_root, limited = discover_sections(sections, snapshot.store_root)
+            added, snapshot.store_root, limited = discover_sections(
+                sections,
+                snapshot.store_root,
+                snapshot.store_scope.section_limit,
+            )
+            if limited or not added:
+                snapshot.store_scope.navigation_truncated = limited
             _mark_redirect_aliases(run)
             snapshot.evidence.extend(added)
             _update_report(run)
@@ -175,8 +196,10 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         limited = await _collect_store(run, token)
         await store.checkpoint(run, token, "translation")
         await _localize(run)
+        scope = snapshot.store_scope
         snapshot.notes = [
-            f"采集范围最多 {SECTION_LIMIT} 个栏目，每栏保留最多 {SECTION_ASIN_LIMIT} 个 ASIN。"
+            f"采集范围最多 {scope.section_limit} 个栏目，"
+            f"每栏保留最多 {scope.asin_limit_per_section} 个 ASIN。"
         ]
         if limited:
             snapshot.notes.append("达到栏目数量上限，部分已发现的栏目尚未采集。")

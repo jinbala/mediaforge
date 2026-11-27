@@ -33,6 +33,8 @@ import {
   activeAmazonRun,
   amazonArchiveCounts,
   amazonArchiveCoverage,
+  amazonArchiveSampleId,
+  amazonEvidenceSampleId,
   amazonHistoryKey,
   amazonIdentityLabel,
   amazonListingSources,
@@ -42,6 +44,7 @@ import {
   formatAmazonReport,
   groupAmazonListings,
   readAmazonHistory,
+  revealAmazonSample,
   saveAmazonHistory,
   type AmazonListing,
   type AmazonReport,
@@ -103,11 +106,14 @@ function ListingSources({ asin, run }: { asin: string; run: AmazonRun | null }) 
   if (!evidence.length) return null
   return (
     <div className="mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
-      {evidence.map((item) => (
-        <a key={item.key} className="hover:text-primary" href={'#evidence-' + item.key}>
-          来源 · {item.title_zh ?? item.title}
-        </a>
-      ))}
+      {evidence.map((item) => {
+        const id = amazonEvidenceSampleId(item.key, asin)
+        return (
+          <a key={item.key} className="hover:text-primary" href={'#' + id} onClick={() => revealAmazonSample(id)}>
+            来源 · {item.title_zh ?? item.title}
+          </a>
+        )
+      })}
     </div>
   )
 }
@@ -152,7 +158,7 @@ function StoreSizeGroup({ items, loading, run, onResearch }: {
         {variant?.title_zh && <p className="border-b px-3 py-2 text-xs text-muted-foreground" lang="en">{variant.title}</p>}
         <ul className="divide-y" aria-label="尺码规格">
           {items.map((item) => (
-            <li key={item.asin} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-1.5">
+            <li key={item.asin} id={amazonArchiveSampleId(item.asin)} tabIndex={-1} className="flex scroll-mt-6 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-1.5 target:bg-muted">
               <a href={item.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 hover:text-primary">
                 <span className="font-medium">{listingSize(item)}</span>
                 <span className="font-mono text-xs text-muted-foreground">{item.asin}</span>
@@ -207,7 +213,7 @@ function Listings({ items, groups, ranked, loading, run, onResearch }: {
               </td>
             </tr>
           ) : (
-            <tr key={item.asin}>
+            <tr key={item.asin} id={amazonArchiveSampleId(item.asin)} tabIndex={-1} className="scroll-mt-6 target:bg-muted">
               {ranked && <td className="px-3 py-3 tabular-nums">{item.rank ?? '—'}</td>}
               <td className="px-3 py-3">
                 <a className="group flex items-center gap-3 rounded-md" href={item.url} target="_blank" rel="noreferrer">

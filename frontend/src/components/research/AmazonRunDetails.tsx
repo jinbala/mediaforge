@@ -1,7 +1,9 @@
 import { ArrowDownToLine, ExternalLink, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
-  activeAmazonRun, amazonRunLabels, amazonStepLabels, amazonTime, downloadAmazonFile,
+  activeAmazonRun, amazonArchiveSampleId, amazonCollectionRange, amazonEvidenceSampleId,
+  amazonRunLabels, amazonStepLabels, amazonTime, downloadAmazonFile, formatAmazonStoreSamples,
+  revealAmazonSample,
   type AmazonEvidence, type AmazonRetryTarget, type AmazonRun,
 } from '@/lib/amazon-research'
 
@@ -23,9 +25,9 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
   onRetry: (target: AmazonRetryTarget, key?: string) => void
 }) {
   const snapshot = run.snapshot
-  const sections = snapshot.evidence.filter((item) => item.kind === 'section')
+  const range = amazonCollectionRange(run)
   const active = activeAmazonRun(run)
-  const pending = sections.filter((item) => item.status === 'pending').length
+  const pending = range.section_status_counts.pending
   const canRetry = !active && run.attempt < 6
   return (
     <section className="space-y-3 rounded-lg border bg-card p-4" aria-label="调研任务进度">
@@ -33,7 +35,7 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
         <h3 className="font-medium">店铺栏目采集</h3>
         <span role="status" className="text-sm">
           {amazonRunLabels[run.status]} · {stageLabels[run.stage] ?? '恢复采集'}
-          {sections.length > 0 && ' · ' + (sections.length - pending) + '/' + sections.length + ' 个栏目'}
+          {range.section_count > 0 && ' · ' + (range.section_count - pending) + '/' + range.section_count + ' 个栏目'}
         </span>
       </div>
       <p className="break-all text-xs text-muted-foreground">
@@ -48,10 +50,7 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
           </a>
         )}
         {snapshot.evidence.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => downloadAmazonFile(JSON.stringify({
-            task_id: run.id, source: run.source, created_at: run.created_at, updated_at: run.updated_at,
-            status: run.status, ...snapshot,
-          }, null, 2), run.id + '-samples.json', 'application/json')}>
+          <Button variant="outline" size="sm" onClick={() => downloadAmazonFile(formatAmazonStoreSamples(run), run.id + '-samples.json', 'application/json')}>
             <ArrowDownToLine aria-hidden="true" />下载栏目采集记录
           </Button>
         )}
@@ -62,6 +61,11 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
         )}
       </div>
 
+      {range.section_count > 0 && (
+        <p className="text-xs text-muted-foreground">
+          本次 {range.raw_card_count} 条栏目卡片 · {range.unique_asin_count} 个去重 ASIN
+        </p>
+      )}
       {snapshot.translation_missing.length > 0 && (
         <p className="text-xs text-muted-foreground">未取得译文的原文字段共 {snapshot.translation_missing.length} 个。</p>
       )}
@@ -94,15 +98,25 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
                 <details className="mt-2 text-xs">
                   <summary className="cursor-pointer">查看本页商品证据</summary>
                   <ul className="mt-1 list-disc space-y-1 pl-5">
-                    {item.products.map((product) => (
-                      <li key={product.asin}>
-                        <a href={product.url} target="_blank" rel="noreferrer" className="text-primary">{product.asin} · {product.title_zh ?? product.title}</a>
-                        {' · 价 ' + (product.price ?? '未知') + (product.price_currency ? ' ' + product.price_currency : '')}
-                        {' · 评分 ' + (product.rating ?? '未知') + ' · 评分数 ' + (product.rating_count ?? '未知')}
-                        {product.store_variant && ' · ' + [product.store_variant.color, product.store_variant.size].filter(Boolean).join(' / ')}
-                        {product.image_url && <a href={product.image_url} target="_blank" rel="noreferrer" className="ml-2 text-primary">主图</a>}
-                      </li>
-                    ))}
+                    {item.products.map((product) => {
+                      const sampleId = amazonEvidenceSampleId(item.key, product.asin)
+                      const archiveId = amazonArchiveSampleId(product.asin)
+                      const color = product.color ?? product.store_variant?.color
+                      const size = product.size ?? product.store_variant?.size
+                      return (
+                        <li key={product.asin} id={sampleId} tabIndex={-1} className="scroll-mt-6 rounded p-1 target:bg-muted">
+                          <a href={product.url} target="_blank" rel="noreferrer" className="text-primary">{product.asin} · {product.title_zh ?? product.title}</a>
+                          {' · 价 ' + (product.price ?? '未知') + (product.price_currency ? ' ' + product.price_currency : '')}
+                          {product.price_label && '（' + product.price_label + '）'}
+                          {' · 评分 ' + (product.rating ?? '未知') + ' · 评分数 ' + (product.rating_count ?? '未知')}
+                          {(color || size) && ' · ' + [color, size].filter(Boolean).join(' / ')}
+                          {product.image_url && <a href={product.image_url} target="_blank" rel="noreferrer" className="ml-2 text-primary">主图</a>}
+                          {snapshot.asin_sources[product.asin] && (
+                            <a href={'#' + archiveId} onClick={() => revealAmazonSample(archiveId)} className="ml-2 text-primary">返回归档 {product.asin}</a>
+                          )}
+                        </li>
+                      )
+                    })}
                   </ul>
                 </details>
               )}

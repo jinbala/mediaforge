@@ -57,6 +57,12 @@ class AmazonStoreArchive(BaseModel):
     identities: dict[str, AmazonStoreIdentity]
 
 
+class AmazonStoreSampleScope(BaseModel):
+    section_limit: int
+    asin_limit_per_section: int
+    navigation_truncated: bool | None = None
+
+
 class AmazonEvidence(BaseModel):
     key: str
     kind: Literal["section", "suggestions"]
@@ -86,6 +92,7 @@ class AmazonResearchSnapshot(BaseModel):
     source_language: Literal["en-US"] = "en-US"
     report_language: Literal["zh-CN"] = "zh-CN"
     store_root: str | None = None
+    store_scope: AmazonStoreSampleScope | None = None
     evidence: list[AmazonEvidence] = Field(default_factory=list)
     asin_sources: dict[str, list[str]] = Field(default_factory=dict)
     product_archive: AmazonStoreArchive | None = None
