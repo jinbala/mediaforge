@@ -16,6 +16,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "redis>=5.0.0",
     "httpx[http2]>=0.27.0",
+    "beautifulsoup4>=4.13.0,<5",
     "python-dotenv>=1.0.0",
     "langgraph>=1.2.0",
     "langgraph-checkpoint-postgres>=3.1.1",

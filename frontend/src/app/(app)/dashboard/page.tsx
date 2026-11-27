@@ -7,11 +7,13 @@ import {
   ArrowRight,
   CheckCircle2,
   Clock3,
+  EyeOff,
   ImageIcon,
   LibraryBig,
   Loader2,
   Plus,
   RefreshCw,
+  Search,
   Sparkles,
 } from 'lucide-react'
 
@@ -68,6 +70,19 @@ const EMPTY: Overview = {
   analytics: { estimated_cost_usd_7d: 0, platforms: [], models: [], references: [] },
 }
 
+// 按任务 ID 记住当前浏览器隐藏的工作台提醒，任务状态仍由后端维护。
+const HIDDEN_ATTENTION_JOBS_KEY = 'mediaforge:dashboard:hidden-attention-jobs'
+
+function readHiddenAttentionJobs(): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(HIDDEN_ATTENTION_JOBS_KEY) ?? '[]')
+    return Array.isArray(stored) ? stored.filter((jobId): jobId is string => typeof jobId === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 function durationLabel(seconds: number | null) {
   if (seconds === null) return '暂无数据'
   const minutes = Math.max(1, Math.round(seconds / 60))
@@ -82,6 +97,18 @@ export default function DashboardPage() {
   const [overview, setOverview] = useState<Overview>(EMPTY)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [hiddenAttentionJobs, setHiddenAttentionJobs] = useState(readHiddenAttentionJobs)
+
+  const hideAttentionJob = (jobId: string) => {
+    // 先合并浏览器记录，保留其他标签页已经隐藏的提醒。
+    const hiddenJobs = [...new Set([...readHiddenAttentionJobs(), ...hiddenAttentionJobs, jobId])]
+    setHiddenAttentionJobs(hiddenJobs)
+    try {
+      window.localStorage.setItem(HIDDEN_ATTENTION_JOBS_KEY, JSON.stringify(hiddenJobs))
+    } catch {
+      // 浏览器存储不可用时，本次页面访问仍能通过上方的状态更新隐藏提醒。
+    }
+  }
 
   const load = async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -105,6 +132,9 @@ export default function DashboardPage() {
 
   if (loading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-primary" /></div>
 
+  // 筛选后的列表同时决定提醒数量和展示内容。
+  const attentionJobs = overview.attention_jobs.filter((job) => !hiddenAttentionJobs.includes(job.job_id))
+
   return (
     <div className="mx-auto max-w-[1480px] space-y-5">
       <header className="flex flex-col gap-4 border-b pb-5 lg:flex-row lg:items-end lg:justify-between">
@@ -114,6 +144,7 @@ export default function DashboardPage() {
           <p className="mt-1 text-sm text-muted-foreground">处理异常、继续生成，或者从最近的结果快速复用。</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button asChild variant="outline"><Link href="/research"><Search className="mr-2 h-4 w-4" />亚马逊调研</Link></Button>
           <Button asChild variant="outline"><Link href="/products"><LibraryBig className="mr-2 h-4 w-4" />选择爆款参考</Link></Button>
           <Button asChild><Link href="/batch"><Plus className="mr-2 h-4 w-4" />生成单品爆款图</Link></Button>
         </div>
@@ -121,20 +152,25 @@ export default function DashboardPage() {
 
       {error && <div className="flex items-center justify-between rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"><span>{error}</span><Button size="sm" variant="ghost" onClick={() => void load()}><RefreshCw className="h-4 w-4" /></Button></div>}
 
-      {overview.attention_jobs.length > 0 && (
+      {attentionJobs.length > 0 && (
         <section className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-4">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-amber-500"><AlertTriangle className="h-5 w-5" /></div>
           <div className="min-w-0 flex-1">
-            <h2 className="font-medium">有 {overview.attention_jobs.length} 个任务需要处理</h2>
+            <h2 className="font-medium">有 {attentionJobs.length} 个任务需要处理</h2>
             <ul className="divide-y divide-border/60">
-              {overview.attention_jobs.map((job) => {
+              {attentionJobs.map((job) => {
                 const label = job.sku_id ? `SKU ${job.sku_id}` : job.product_name
                 return (
                   <li key={job.job_id} className="flex flex-wrap items-center justify-between gap-2 py-2 last:pb-0">
                     <p className="min-w-0 break-words text-sm text-muted-foreground">{label} · {statusLabel(job.status)}</p>
-                    <Button asChild size="sm" variant="outline">
-                      <Link href={`/tasks?jobId=${job.job_id}`} aria-label={`处理 ${label} 的失败图片`}>处理失败<ArrowRight className="ml-2 h-4 w-4" /></Link>
-                    </Button>
+                    <div className="ml-auto flex items-center gap-2">
+                      <Button type="button" size="sm" variant="ghost" className="text-muted-foreground" aria-label={`隐藏 ${label} 的待处理提醒`} onClick={() => hideAttentionJob(job.job_id)}>
+                        <EyeOff aria-hidden="true" />隐藏
+                      </Button>
+                      <Button asChild size="sm" variant="outline">
+                        <Link href={`/tasks?jobId=${job.job_id}`} aria-label={`处理 ${label} 的失败图片`}>处理失败<ArrowRight className="ml-2 h-4 w-4" /></Link>
+                      </Button>
+                    </div>
                   </li>
                 )
               })}

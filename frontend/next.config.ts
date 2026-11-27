@@ -39,6 +39,7 @@ const nextConfig: NextConfig = {
       '/tasks',
       '/asset',
       '/products',
+      '/research',
       '/settings/:path*',
     ].map((source) => ({ source, headers: noStore }))
   },

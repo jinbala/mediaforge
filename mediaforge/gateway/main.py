@@ -16,6 +16,7 @@ from mediaforge.gateway.middleware.observability import ObservabilityMiddleware
 from mediaforge.gateway.middleware.rate_limit import limiter
 from mediaforge.gateway.routers import (
     agent,
+    amazon_research,
     api_keys,
     auth,
     batch,
@@ -131,6 +132,7 @@ app.add_middleware(ObservabilityMiddleware)
 
 # Routers
 app.include_router(agent.router)
+app.include_router(amazon_research.router)
 app.include_router(api_keys.router)
 app.include_router(auth.router)
 app.include_router(batch.router)

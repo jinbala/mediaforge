@@ -8,6 +8,7 @@ import {
   ClipboardList,
   LibraryBig,
   MessageSquare,
+  Search,
   Settings,
   X,
 } from 'lucide-react'
@@ -18,6 +19,7 @@ import { Button } from '@/components/ui/button'
 const nav = [
   { name: '工作台', href: '/dashboard', icon: LayoutDashboard },
   { name: '爆款商品库', href: '/products', icon: LibraryBig },
+  { name: '亚马逊调研', href: '/research', icon: Search },
   { name: '图片创作', href: '/batch', icon: Sparkles },
   { name: '任务列表', href: '/tasks', icon: ClipboardList },
   { name: '智能助手', href: '/agent', icon: MessageSquare },

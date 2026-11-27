@@ -146,19 +146,23 @@ async function attemptRefresh(): Promise<boolean> {
   return refreshInflight
 }
 
+// 通常等待 30 秒。像店铺调研这种较慢的请求可单独设置超时时间。
+type ApiRequestOptions = RequestInit & { timeoutMs?: number }
+
 async function request<T>(
   path: string,
-  options: RequestInit,
+  options: ApiRequestOptions,
   read: (response: Response) => Promise<T>,
   retried = false,
 ): Promise<T> {
   const url = `${API_BASE}${path}`
   const method = options.method || 'GET'
   const headers = buildHeaders(method, options.headers, options.body)
-  const { signal, clear } = timeoutSignal(options.signal, 30000)
+  const { timeoutMs = 30000, ...fetchOptions } = options
+  const { signal, clear } = timeoutSignal(options.signal, timeoutMs)
   try {
     const res = await fetch(url, {
-      ...options,
+      ...fetchOptions,
       method,
       signal,
       headers,
@@ -187,7 +191,7 @@ async function request<T>(
   }
 }
 
-function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
+function requestJson<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   return request<T>(path, options, async (response) => {
     if (response.status === 204) return undefined as T
     const contentType = response.headers.get('content-type') || ''
@@ -250,8 +254,8 @@ export const api = {
   get: <T>(path: string) => requestJson<T>(path, { method: 'GET' }),
   getFile: (path: string, signal?: AbortSignal) =>
     request(path, { method: 'GET', signal }, (response) => response.blob()),
-  post: <T>(path: string, body: unknown) =>
-    requestJson<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  post: <T>(path: string, body: unknown, options?: { timeoutMs?: number }) =>
+    requestJson<T>(path, { method: 'POST', body: JSON.stringify(body), ...options }),
   put: <T>(path: string, body: unknown) =>
     requestJson<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   delete: <T>(path: string) => requestJson<T>(path, { method: 'DELETE' }),

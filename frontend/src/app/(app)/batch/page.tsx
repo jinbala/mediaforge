@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 
 import { api, ApiError } from '@/lib/api'
+import { AMAZON_BRIEF_KEY, AMAZON_BRIEF_LIMIT, AMAZON_BRIEF_PARAM } from '@/lib/amazon-research'
 import { inferMarketFromPlatforms } from '@/lib/sku-options'
 import { useModels } from '@/hooks/useModels'
 import { SkuForm, type Sku } from '@/components/SkuForm'
@@ -131,9 +132,32 @@ export default function BatchPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
+    const amazonBriefId = params.get(AMAZON_BRIEF_PARAM)
     const reuseJobId = params.get('reuseJobId')
     const sourceSku = params.get('sourceSku')
     const refSku = params.get('refSku')
+    if (amazonBriefId) {
+      // 只有地址栏 ID 和标签页中暂存的 ID 匹配时，才带入对应的需求。
+      try {
+        const saved = JSON.parse(window.sessionStorage.getItem(AMAZON_BRIEF_KEY) ?? 'null')
+        if (saved?.id === amazonBriefId && typeof saved.brief === 'string' && saved.brief.trim()) {
+          // 用空白 SKU 预填 Amazon 平台和图片类型，用户继续上传自有原图并填写 SKU。
+          setSku({
+            ...createSku(),
+            target_platforms: 'amazon',
+            market: inferMarketFromPlatforms(['amazon']),
+            output_types: ['main_image', 'detail_page'],
+            style_hint: saved.brief.slice(0, AMAZON_BRIEF_LIMIT),
+          })
+          setSuccess('已带入亚马逊图片需求。请上传自己的商品原图并填写 SKU。')
+          return
+        }
+      } catch {
+        // 浏览器存储不可用时，也提示用户从调研页重新带入。
+      }
+      setError('亚马逊图片需求已失效，请回到调研页面重新带入。')
+      return
+    }
     if (reuseJobId) {
       void api.get<JobDetail>(`/v1/tasks/${reuseJobId}`).then((job) => {
         const input = job.input_data
