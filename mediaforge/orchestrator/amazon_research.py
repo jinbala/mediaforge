@@ -10,12 +10,14 @@ from mediaforge.db import amazon_research_store as store
 from mediaforge.models.amazon_research_run import (
     AmazonEvidence,
     AmazonResearchRun,
+    AmazonStoreSample,
     AmazonStoreSampleScope,
 )
 from mediaforge.orchestrator.amazon_category import collect_category
 from mediaforge.rag.amazon_research import SUGGESTIONS, _fetch_suggestions, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import (
     archive,
+    build_product_matrix,
     section_index,
     store_public_report,
     summarize_archive,
@@ -32,11 +34,12 @@ from mediaforge.rag.amazon_store_collection import (
 from mediaforge.rag.amazon_store_translation import localize_research_fields
 
 
-def _update_report(run: AmazonResearchRun) -> None:
+def _update_report(run: AmazonResearchRun) -> list[AmazonStoreSample]:
     run.snapshot.asin_sources = section_index(run.snapshot)
     listings = archive(run.snapshot)
     run.snapshot.product_archive = summarize_archive(listings)
     run.report = store_public_report(run.inputs, run.snapshot, run.created_at, listings)
+    return listings
 
 
 async def _collect_sections(client: httpx.AsyncClient, run: AmazonResearchRun, token: UUID) -> None:
@@ -129,6 +132,7 @@ async def _collect_suggestions(client: httpx.AsyncClient, run: AmazonResearchRun
 
 async def _collect_store(run: AmazonResearchRun, token: UUID) -> bool:
     snapshot = run.snapshot
+    snapshot.product_matrix = None
     if snapshot.store_scope is None:
         # 保存任务当时的样本边界，之后导出历史时无需以当前配置猜测。
         snapshot.store_scope = AmazonStoreSampleScope(
@@ -211,7 +215,8 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
             snapshot.notes.append("公开导航未确认首页，报告首页链接暂用本次提交地址。")
         if snapshot.translation_status in {"incomplete", "failed"}:
             snapshot.notes.append("部分店铺字段未取得中文译文，仍可查看原文和对应商品。")
-        _update_report(run)
+        listings = _update_report(run)
+        snapshot.product_matrix = build_product_matrix(snapshot, listings)
         sections = [
             item
             for item in snapshot.evidence

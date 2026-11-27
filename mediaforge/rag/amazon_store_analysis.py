@@ -1,13 +1,23 @@
+import re
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal
+from itertools import combinations
+from statistics import mean, median
 
 from mediaforge.models.amazon_research import AmazonResearchReport, AmazonStorePage
 from mediaforge.models.amazon_research_run import (
     AmazonEvidence,
+    AmazonPriceBand,
+    AmazonPriceObservation,
+    AmazonRatedStyle,
     AmazonResearchRunRequest,
     AmazonResearchSnapshot,
+    AmazonSectionMetrics,
+    AmazonSectionOverlap,
     AmazonStoreArchive,
     AmazonStoreIdentity,
+    AmazonStoreProductMatrix,
     AmazonStoreSample,
 )
 
@@ -137,7 +147,7 @@ def archive(snapshot: AmazonResearchSnapshot) -> list[AmazonStoreSample]:
     for asin, rows in observations.items():
         current = rows[0].model_copy(deep=True)
         for sample in rows[1:]:
-            for name in ("rating", "rating_count", "image_url"):
+            for name in ("rating", "rating_count", "image_url", "product_type"):
                 if getattr(current, name) is None:
                     setattr(current, name, getattr(sample, name))
             if current.store_variant is None and sample.store_variant:
@@ -194,6 +204,137 @@ def summarize_archive(products: list[AmazonStoreSample]) -> AmazonStoreArchive:
         unknown_color_count=sum(item.color_group_asin is None for item in identities.values()),
         unknown_size_count=sum(item.size is None for item in identities.values()),
         identities=identities,
+    )
+
+
+PRICE_BOUNDS_CENTS = (0, 1500, 2500, 4000, 6000)
+_USD_PRICE = re.compile(r"(?:US\s*)?\$(\d{1,3}(?:,\d{3}){1,2}|\d{1,7})(?:\.(\d{2}))?")
+_COUNT = re.compile(r"(?:\d{1,3}(?:,\d{3}){1,3}|\d{1,10})")
+_MODEL_SUFFIX = re.compile(r"(?<![\w.])([A-Z]{1,3}-?\d{3,7}|\d{4,7})\s*$")
+
+
+def public_usd_cents(product: AmazonStoreSample) -> int | None:
+    # 仅使用单个明确的美元报价，保留区间、非 USD 和无法识别的原始金额供复核。
+    if product.price_currency not in {None, "USD"}:
+        return None
+    match = _USD_PRICE.fullmatch((product.price or "").strip())
+    if match is None:
+        return None
+    cents = int(match[1].replace(",", "")) * 100 + int(match[2] or 0)
+    return cents if cents > 0 else None
+
+
+def _rating_value(product: AmazonStoreSample) -> Decimal | None:
+    if re.fullmatch(r"[0-5](?:\.\d{1,2})?", product.rating or ""):
+        result = Decimal(product.rating)
+        return result if 0 < result <= 5 else None
+    return None
+
+
+def _rating_total(product: AmazonStoreSample) -> int | None:
+    if _COUNT.fullmatch(product.rating_count or ""):
+        return int(product.rating_count.replace(",", ""))
+    return None
+
+
+def _product_section_metrics(section: AmazonEvidence) -> AmazonSectionMetrics:
+    scores = [score for row in section.products if (score := _rating_value(row)) is not None]
+    totals = [count for row in section.products if (count := _rating_total(row)) is not None]
+    return AmazonSectionMetrics(
+        section=section.key,
+        asin_count=section.observed_count,
+        priced_count=sum(public_usd_cents(row) is not None for row in section.products),
+        rating_count=len(scores),
+        average_rating=float(round(mean(scores), 2)) if scores else None,
+        rating_total_count=len(totals),
+        median_rating_total=median(totals) if totals else None,
+    )
+
+
+def build_product_matrix(
+    snapshot: AmazonResearchSnapshot,
+    products: list[AmazonStoreSample],
+) -> AmazonStoreProductMatrix:
+    sections = [item for item in section_samples(snapshot) if item.code != "duplicate"]
+    prices = {}
+    with_price_text = set()
+    memberships = {}
+    for section in sections:
+        memberships[section.key] = {row.asin for row in section.products}
+        for row in section.products:
+            if row.price:
+                with_price_text.add(row.asin)
+            # 同一 ASIN 按栏目登记顺序取第一个有效美元报价，并保存使用的栏目。
+            if row.asin not in prices and (cents := public_usd_cents(row)) is not None:
+                prices[row.asin] = AmazonPriceObservation(section=section.key, price_cents=cents)
+    bands = []
+    for low, high in zip(PRICE_BOUNDS_CENTS, (*PRICE_BOUNDS_CENTS[1:], None), strict=True):
+        members = sorted(
+            asin
+            for asin, quote in prices.items()
+            if quote.price_cents >= low and (high is None or quote.price_cents < high)
+        )
+        bands.append(
+            AmazonPriceBand(
+                min_cents=low,
+                max_cents=high,
+                asins=members,
+                share_pct=round(100 * len(members) / len(prices), 1) if prices else None,
+            )
+        )
+
+    overlaps = [
+        AmazonSectionOverlap(sections=(first, second), asins=sorted(shared))
+        for first, second in combinations(memberships, 2)
+        if (shared := memberships[first] & memberships[second])
+    ]
+    types, specs, models = defaultdict(list), defaultdict(list), defaultdict(list)
+    leaders = []
+    for product in products:
+        if product.product_type:
+            types[product.product_type].append(product.asin)
+        if product.color and product.size:
+            size_key = product.size.casefold()
+            size = _SIZE_ALIASES.get(size_key, product.size)
+            specs[f"{product.color} / {size}"].append(product.asin)
+        # 商品标题末尾标准编号仅用于提示复核，不能确认是型号或系列。
+        if (match := _MODEL_SUFFIX.search(product.title)) and not re.fullmatch(
+            r"(?:19|20)\d{2}",
+            match[1],
+        ):
+            models[match[1]].append(product.asin)
+        if (total := _rating_total(product)) is not None:
+            leaders.append(
+                AmazonRatedStyle(
+                    asin=product.asin,
+                    count=total,
+                    family_asin=product.family_asin,
+                )
+            )
+    ordered_leaders = sorted(leaders, key=lambda row: (-row.count, row.asin))
+    by_style = {}
+    for row in ordered_leaders:
+        # 同款可能共用评分池，只展示最高公开评分数的 ASIN，避免把变体评分数相加。
+        by_style.setdefault(row.family_asin or row.asin, row)
+    return AmazonStoreProductMatrix(
+        asin_count=len(products),
+        prices=prices,
+        price_bands=bands,
+        missing_price=sorted(
+            product.asin for product in products if product.asin not in with_price_text
+        ),
+        missing_eligible_price=sorted(with_price_text - prices.keys()),
+        sections=[_product_section_metrics(section) for section in sections],
+        overlaps=overlaps,
+        product_types=dict(types),
+        specification_combinations=dict(specs),
+        model_candidates=dict(models),
+        rating_leaders=list(by_style.values())[:5],
+        new_sections={
+            section.key: sorted(memberships[section.key])
+            for section in sections
+            if section.role == "new"
+        },
     )
 
 

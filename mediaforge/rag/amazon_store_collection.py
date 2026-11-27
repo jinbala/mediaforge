@@ -22,7 +22,6 @@ from mediaforge.rag.amazon_research import (
     _linked_source,
     _parse_listings,
     _rating,
-    _rating_count,
     _store_pages,
     _store_product_cards,
     _text,
@@ -158,11 +157,17 @@ def _section_products(soup: BeautifulSoup, limit: int) -> list[AmazonStoreSample
             ("starRating", "customerReviews", "reviews"),
             ("displayString", "rating", "value"),
         )
-        count = _string(_record(summary, "count"), "displayString") or _card_value(
+        count_data = _record(summary, "count")
+        count = _string(count_data, "displayString") or _card_value(
             card,
             ("customerReviews", "reviews", "starRating"),
             ("count", "ratingCount", "reviewCount"),
         )
+        if type(exact_count := count_data.get("value")) is int and exact_count >= 0:
+            count = f"{exact_count:,}"
+        elif count:
+            # 保留 K/M 等近似原文，避免将如「1.2K」误缩成个位数。
+            count = re.sub(r"\s+(?:ratings|reviews)$", "", count, flags=re.I)
         brand, store_url = _store_brand(card)
         sample = AmazonStoreSample(
             **listing.model_dump(exclude={"title", "price", "rating", "rating_count"}),
@@ -177,7 +182,7 @@ def _section_products(soup: BeautifulSoup, limit: int) -> list[AmazonStoreSample
             brand=brand,
             store_url=store_url,
             rating=_rating(score),
-            rating_count=_rating_count(count),
+            rating_count=count,
         )
         if (specs := _variant_coordinates(card)) and (
             choices := specs[2].get(listing.asin)

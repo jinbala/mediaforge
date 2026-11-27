@@ -152,6 +152,8 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
     }
     if (brief.trim()) lines.push('', '### 图片需求', brief.split(/\r?\n/).map(escape).join('\n\n'))
   }
+  const matrix = run?.snapshot.product_matrix
+  if (matrix && run) lines.push(...formatAmazonProductMatrix(run, matrix, escape))
   const archive = run?.snapshot.product_archive
   if (archive) {
     lines.push('', '### 商品归档', '', ...amazonArchiveCounts(archive).map(([label, count]) => '- ' + label + ' · ' + count))
@@ -241,6 +243,36 @@ type AmazonStoreArchive = {
   identities: Record<string, AmazonStoreIdentity>
 }
 
+export type AmazonPriceBand = {
+  min_cents: number
+  max_cents: number | null
+  asins: string[]
+  share_pct: number | null
+}
+export type AmazonStoreProductMatrix = {
+  rules_version: string
+  asin_count: number
+  prices: Record<string, { section: string; price_cents: number }>
+  price_bands: AmazonPriceBand[]
+  missing_price: string[]
+  missing_eligible_price: string[]
+  sections: {
+    section: string
+    asin_count: number | null
+    priced_count: number
+    rating_count: number
+    average_rating: number | null
+    rating_total_count: number
+    median_rating_total: number | null
+  }[]
+  overlaps: { sections: [string, string]; asins: string[] }[]
+  product_types: Record<string, string[]>
+  specification_combinations: Record<string, string[]>
+  model_candidates: Record<string, string[]>
+  rating_leaders: { asin: string; count: number; family_asin: string | null }[]
+  new_sections: Record<string, string[]>
+}
+
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
   inputs: { source: string; keyword: string; category?: CategoryInputs | null }
@@ -265,6 +297,7 @@ export type AmazonRun = AmazonRunSummary & {
     evidence: AmazonEvidence[]
     asin_sources: Record<string, string[]>
     product_archive?: AmazonStoreArchive | null
+    product_matrix?: AmazonStoreProductMatrix | null
   }
 }
 
@@ -358,4 +391,53 @@ export function formatAmazonStoreSamples(run: AmazonRun) {
     collection_range: amazonCollectionRange(run),
     ...run.snapshot,
   }, null, 2) + '\n'
+}
+
+export function amazonPriceBandLabel(band: AmazonPriceBand) {
+  return band.max_cents === null
+    ? `USD ≥${band.min_cents / 100}`
+    : `USD ${band.min_cents / 100}–<${band.max_cents / 100}`
+}
+
+export function amazonPriceCoverage(matrix: AmazonStoreProductMatrix) {
+  const cents = Object.values(matrix.prices).map((quote) => quote.price_cents)
+  const percentage = matrix.asin_count ? (cents.length / matrix.asin_count * 100).toFixed(1) + '%' : '未知'
+  const range = cents.length ? ` 已采价格 USD ${(Math.min(...cents) / 100).toFixed(2)}–${(Math.max(...cents) / 100).toFixed(2)}。` : ''
+  return `有效美元报价 ${cents.length}/${matrix.asin_count}（覆盖率 ${percentage}）。缺价 ${matrix.missing_price.length} 个，有原报价但无法纳入美元单价统计 ${matrix.missing_eligible_price.length} 个。` + range
+}
+
+export const amazonPortfolioPriceRule = '价格带按 USD 单价左闭右开。跨栏目同一 ASIN 取登记顺序中第一个有效报价。占比的分母为有有效美元价的去重 ASIN。'
+
+function formatAmazonProductMatrix(run: AmazonRun, matrix: AmazonStoreProductMatrix, escape: (value: string) => string) {
+  const sections = new Map(run.snapshot.evidence.map((item) => [item.key, item]))
+  const section = (key: string) => {
+    const item = sections.get(key)
+    return item ? '[' + escape(item.title_zh ?? item.title) + '](' + (item.final_url ?? item.url) + ')' : key
+  }
+  const groups = (label: string, values: Record<string, string[]>) => [
+    '', '#### ' + label,
+    ...(Object.keys(values).length ? Object.entries(values).map(([name, asins]) => `- ${escape(name)} · ${asins.length} 个 · ${asins.join('、')}`) : ['样本未知。']),
+  ]
+  return [
+    '', '### 产品组合与价格带', '',
+    `规则版本 ${matrix.rules_version}。评分均值和评分数中位数按栏目 ASIN 样本计算。评分数可能跨同款共享。`,
+    amazonPriceCoverage(matrix), amazonPortfolioPriceRule,
+    ...(matrix.missing_price.length ? ['缺价 ASIN · ' + matrix.missing_price.join('、')] : []),
+    ...(matrix.missing_eligible_price.length ? ['原报价待核对 ASIN · ' + matrix.missing_eligible_price.join('、')] : []),
+    ...matrix.price_bands.flatMap((band) => [
+      `- ${amazonPriceBandLabel(band)} · ${band.asins.length} 个 · 占比 ${band.share_pct ?? '未知'}${band.share_pct === null ? '' : '%'}`,
+      ...band.asins.map((asin) => `  - ${asin} · USD ${(matrix.prices[asin].price_cents / 100).toFixed(2)} · ${section(matrix.prices[asin].section)}`),
+    ]),
+    '', '#### 栏目商品与评分', '',
+    ...matrix.sections.map((row) => `- ${section(row.section)} · 商品 ${row.asin_count ?? '未知'} · 有效价 ${row.priced_count} · 评分均值 ${row.average_rating ?? '未知'}（n=${row.rating_count}）· 评分数中位 ${row.median_rating_total ?? '未知'}（n=${row.rating_total_count}）`),
+    '', '#### 栏目重叠', '',
+    ...(matrix.overlaps.length ? matrix.overlaps.map((row) => `- ${section(row.sections[0])} / ${section(row.sections[1])} · ${row.asins.length} 个 · ${row.asins.join('、')}`) : ['已采样本中未观察到栏目重叠。']),
+    ...groups('商品类型（平台原文）', matrix.product_types),
+    ...groups('配色与尺码组合', matrix.specification_combinations),
+    ...groups('标题编号候选（型号待核实）', matrix.model_candidates),
+    '', '#### 公开评分数领先款', '',
+    ...(matrix.rating_leaders.length ? matrix.rating_leaders.map((row) => `- [${row.asin}](https://www.amazon.com/dp/${row.asin}) · ${row.count} 个评分 · 同款组 ${row.family_asin ?? '待确认'}`) : ['公开评分数未知。']),
+    '', '#### 新品栏目所见样本', '',
+    ...(Object.keys(matrix.new_sections).length ? Object.entries(matrix.new_sections).map(([key, asins]) => `- ${section(key)} · ${asins.length} 个 · ${asins.join('、')}`) : ['公开导航中未识别到新品栏目，新品样本未知。']),
+  ]
 }

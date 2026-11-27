@@ -25,7 +25,12 @@ from mediaforge.models.user import User
 from mediaforge.orchestrator import amazon_research as pipeline
 from mediaforge.rag import amazon_store_collection
 from mediaforge.rag.amazon_research import AMAZON, amazon_public_client
-from mediaforge.rag.amazon_store_analysis import archive, section_index, summarize_archive
+from mediaforge.rag.amazon_store_analysis import (
+    archive,
+    build_product_matrix,
+    section_index,
+    summarize_archive,
+)
 from mediaforge.rag.amazon_store_collection import collect_evidence, section_step
 
 API = "/api/v1/research/amazon/runs"
@@ -173,6 +178,9 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
         2,
     )
     assert summary["unknown_family_count"] == 0
+    assert snap["product_matrix"]["asin_count"] == 3
+    assert snap["product_matrix"]["new_sections"]
+
     assert len(snap["asin_sources"][IDS[1]]) == 3
     assert len(first["report"]["listings"]) == 3
     assert sections[HOME]["products"][0]["image_url"].endswith(".jpg")
@@ -486,3 +494,66 @@ async def test_run_saves_applied_sampling_limits_and_preserves_page_fields(api, 
         assert item["url"].endswith(IDS[index]) and item["image_url"].endswith(IDS[index] + ".jpg")
         assert item["price"] is None and item["rating"] is None and item["rating_count"] is None
         assert item["store_variant"]["size"] == ("S" if index == 0 else "M")
+
+
+def test_product_matrix_recomputes_bands_overlap_and_ratings_from_public_samples():
+    first, second, ranged = IDS
+    absent = "B000000004"
+    high = "B000000005"
+    family = "B000000010"
+    primary = section_step(INITIAL, "Fixture")
+    new = section_step(NEW, "New Arrivals", "new")
+    a = _variant_sample(first, family, "Blue", "Small")
+    a.title = "Fixture building set 11379"
+    a.product_type, a.price, a.price_currency = "TOY", "$15.00", "USD"
+    a.rating, a.rating_count = "4.2", "100"
+    b = _variant_sample(second, family, "Blue", "Medium")
+    b.product_type, b.price, b.price_currency = "TOY", "S$19.99", "SGD"
+    b.rating, b.rating_count = "3.8", "102"
+    primary.products = [
+        a,
+        b,
+        AmazonStoreSample(
+            asin=ranged,
+            title="Fixture calendar 2026",
+            url=f"{AMAZON}/dp/{ranged}",
+            price="$10 – $20",
+            price_currency="USD",
+            rating_count="1.2K",
+        ),
+    ]
+    primary.observed_count = len(primary.products)
+    new.products = [
+        a.model_copy(update={"price": "$49.99"}),
+        b.model_copy(update={"price": "$25.00", "price_currency": "USD"}),
+        AmazonStoreSample(asin=absent, title="Fixture item", url=f"{AMAZON}/dp/{absent}"),
+        AmazonStoreSample(asin=high, title="Fixture item", url=f"{AMAZON}/dp/{high}", price="$60"),
+    ]
+    new.observed_count = len(new.products)
+    snapshot = AmazonResearchSnapshot(evidence=[primary, new])
+    matrix = build_product_matrix(snapshot, archive(snapshot))
+    assert matrix.asin_count == 5
+    assert matrix.missing_price == [absent]
+    assert matrix.missing_eligible_price == [ranged]
+    assert matrix.prices[first].price_cents == 1500
+    assert matrix.prices[first].section == primary.key
+    assert matrix.prices[second].price_cents == 2500
+    assert matrix.prices[second].section == new.key
+    assert [band.asins for band in matrix.price_bands] == [[], [first], [second], [], [high]]
+    assert matrix.price_bands[-1].share_pct == 33.3
+    assert matrix.sections[0].average_rating == 4
+    assert matrix.sections[0].median_rating_total == 101
+    assert matrix.sections[0].rating_total_count == 2
+    assert matrix.overlaps[0].asins == [first, second]
+    assert matrix.product_types["TOY"] == [first, second]
+    assert matrix.specification_combinations["Blue / s"] == [first]
+    assert matrix.model_candidates == {"11379": [first]}
+    assert [(row.asin, row.count) for row in matrix.rating_leaders] == [(second, 102)]
+    assert matrix.new_sections == {new.key: [first, second, absent, high]}
+
+
+def test_empty_product_matrix_preserves_unknown_price_share():
+    snapshot = AmazonResearchSnapshot()
+    matrix = build_product_matrix(snapshot, [])
+    assert not matrix.prices and not matrix.new_sections and not matrix.rating_leaders
+    assert all(band.share_pct is None for band in matrix.price_bands)

@@ -22,6 +22,7 @@ import { AmazonCategoryFields, AmazonCategoryReport } from '@/components/researc
 import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
 import { AmazonSkills } from '@/components/research/AmazonSkills'
 import { AmazonScriptTools } from '@/components/research/AmazonScriptTools'
+import { AmazonStoreProductMatrix } from '@/components/research/AmazonStoreProductMatrix'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -591,6 +592,7 @@ export default function ResearchPage() {
       {run && <AmazonRunDetails key={run.id} run={run} busy={loading} pollError={pollError} onRetry={(target, key) => void retryRun(target, key)} />}
 
       {run?.mode === 'bestsellers' && <AmazonCategoryReport run={run} onProduct={(url) => openRelated('product', url)} />}
+      {run?.mode === 'store' && run.snapshot.product_matrix && <AmazonStoreProductMatrix key={run.id} run={run} matrix={run.snapshot.product_matrix} />}
       {report && run?.mode !== 'bestsellers' && (
         <article className="space-y-5" aria-label="调研报告">
           <header className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
