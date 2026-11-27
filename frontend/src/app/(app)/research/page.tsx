@@ -20,6 +20,7 @@ import {
 
 import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
 import { AmazonScriptTools } from '@/components/research/AmazonScriptTools'
+import { AmazonStoreProductMatrix } from '@/components/research/AmazonStoreProductMatrix'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -579,6 +580,8 @@ export default function ResearchPage() {
       )}
 
       {run && <AmazonRunDetails key={run.id} run={run} busy={loading} pollError={pollError} onRetry={(target, key) => void retryRun(target, key)} />}
+
+      {run?.snapshot.product_matrix && <AmazonStoreProductMatrix key={run.id} run={run} matrix={run.snapshot.product_matrix} />}
 
       {report && (
         <article className="space-y-5" aria-label="调研报告">

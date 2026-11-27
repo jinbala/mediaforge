@@ -63,6 +63,55 @@ class AmazonStoreSampleScope(BaseModel):
     navigation_truncated: bool | None = None
 
 
+class AmazonPriceObservation(BaseModel):
+    section: str
+    price_cents: int
+
+
+class AmazonPriceBand(BaseModel):
+    min_cents: int
+    max_cents: int | None
+    asins: list[str]
+    share_pct: float | None
+
+
+class AmazonSectionMetrics(BaseModel):
+    section: str
+    asin_count: int | None
+    priced_count: int
+    rating_count: int
+    average_rating: float | None
+    rating_total_count: int
+    median_rating_total: float | None
+
+
+class AmazonSectionOverlap(BaseModel):
+    sections: tuple[str, str]
+    asins: list[str]
+
+
+class AmazonRatedStyle(BaseModel):
+    asin: str
+    count: int
+    family_asin: str | None
+
+
+class AmazonStoreProductMatrix(BaseModel):
+    rules_version: Literal["us-store-matrix-v1"] = "us-store-matrix-v1"
+    asin_count: int
+    prices: dict[str, AmazonPriceObservation]
+    price_bands: list[AmazonPriceBand]
+    missing_price: list[str]
+    missing_eligible_price: list[str]
+    sections: list[AmazonSectionMetrics]
+    overlaps: list[AmazonSectionOverlap]
+    product_types: dict[str, list[str]]
+    specification_combinations: dict[str, list[str]]
+    model_candidates: dict[str, list[str]]
+    rating_leaders: list[AmazonRatedStyle]
+    new_sections: dict[str, list[str]]
+
+
 class AmazonEvidence(BaseModel):
     key: str
     kind: Literal["section", "suggestions"]
@@ -96,6 +145,7 @@ class AmazonResearchSnapshot(BaseModel):
     evidence: list[AmazonEvidence] = Field(default_factory=list)
     asin_sources: dict[str, list[str]] = Field(default_factory=dict)
     product_archive: AmazonStoreArchive | None = None
+    product_matrix: AmazonStoreProductMatrix | None = None
     translation_status: StepStatus = "pending"
     translation_missing: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
