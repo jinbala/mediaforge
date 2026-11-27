@@ -1,3 +1,5 @@
+import type { CategoryAnalysis, CategoryInputs } from './amazon-category'
+
 export type ResearchMode = 'product' | 'bestsellers' | 'store'
 
 type AmazonStoreVariant = {
@@ -184,7 +186,7 @@ export type AmazonStepStatus = 'pending' | 'success' | 'empty' | 'incomplete' | 
 export type AmazonRetryTarget = 'resume' | 'failed'
 export type AmazonRunSummary = {
   id: string
-  mode: 'store'
+  mode: 'store' | 'bestsellers'
   source: string
   canonical_source: string
   status: AmazonRunStatus
@@ -202,7 +204,7 @@ export type AmazonEvidence = {
   title: string
   title_zh: string | null
   status: AmazonStepStatus
-  kind: 'section' | 'suggestions'
+  kind: 'section' | 'suggestions' | 'board' | 'analysis'
   method: string
   collected_at: string | null
   reason: string | null
@@ -241,7 +243,7 @@ type AmazonStoreArchive = {
 
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
-  inputs: { source: string; keyword: string }
+  inputs: { source: string; keyword: string; category?: CategoryInputs | null }
   report: AmazonReport | null
   snapshot: {
     version: number
@@ -250,6 +252,8 @@ export type AmazonRun = AmazonRunSummary & {
     source_language: string
     report_language: string
     store_root: string | null
+    category_scope?: { main_limit: number; child_limit: number; child_asin_limit: number; discovery_truncated: boolean } | null
+    category_analysis?: CategoryAnalysis | null
     store_scope?: {
       section_limit: number
       asin_limit_per_section: number
@@ -329,7 +333,7 @@ export function revealAmazonSample(id: string) {
 }
 
 export function amazonCollectionRange(run: AmazonRun) {
-  const sections = run.snapshot.evidence.filter((item) => item.kind === 'section')
+  const sections = run.snapshot.evidence.filter((item) => item.kind === (run.mode === 'store' ? 'section' : 'board'))
   const status: Record<AmazonStepStatus, number> = {
     pending: 0, success: 0, empty: 0, incomplete: 0, failed: 0,
   }

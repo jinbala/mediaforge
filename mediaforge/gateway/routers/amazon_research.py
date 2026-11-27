@@ -11,6 +11,7 @@ from starlette.concurrency import run_in_threadpool
 from mediaforge.db import amazon_research_store as store
 from mediaforge.gateway.dependencies import get_current_principal, get_tenant_only
 from mediaforge.gateway.middleware.rate_limit import limiter
+from mediaforge.models.amazon_category import CategoryInputs
 from mediaforge.models.amazon_research import AmazonResearchReport, AmazonResearchRequest
 from mediaforge.models.amazon_research_run import (
     AmazonResearchRun,
@@ -28,9 +29,11 @@ from mediaforge.models.amazon_script_tools import (
     ScriptInput,
     ScriptOutput,
 )
+from mediaforge.models.amazon_skills import SkillDefinition, SkillId, SkillReport, SkillRequest
 from mediaforge.models.tenant import Tenant
 from mediaforge.models.user import User
 from mediaforge.orchestrator.tasks import process_amazon_research
+from mediaforge.rag.amazon_category_collection import board_identity, normalize_board
 from mediaforge.rag.amazon_research import (
     AmazonFetchError,
     AmazonSourceError,
@@ -40,6 +43,8 @@ from mediaforge.rag.amazon_research import (
 from mediaforge.rag.amazon_script_samples import lookup_hs, sample_keywords, sample_products
 from mediaforge.workers.amazon_fba_fees import calculate_fba
 from mediaforge.workers.amazon_landed_cost import calculate_landed
+from mediaforge.workers.amazon_skill_definitions import SKILLS
+from mediaforge.workers.amazon_skills import run_skill
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
 
@@ -89,6 +94,23 @@ async def research_amazon_tool(
     return result
 
 
+@router.get("/amazon/skills", response_model=list[SkillDefinition])
+async def list_amazon_skills(_tenant: Tenant = Depends(get_tenant_only)) -> list[SkillDefinition]:
+    return list(SKILLS.values())
+
+
+@router.post("/amazon/skills/{req}", response_model=SkillReport)
+@limiter.limit("12/minute")
+async def generate_amazon_skill(
+    request: Request, req: SkillId, body: SkillRequest,
+    _tenant: Tenant = Depends(get_tenant_only),
+) -> SkillReport:
+    try:
+        return run_skill(req, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _owner(principal: tuple[User, Tenant]) -> tuple[UUID, UUID]:
     user, tenant = principal
     # 没有创建账号的旧式 API Key 沿用原查询权限，归属到个人历史需要真实账号。
@@ -130,7 +152,20 @@ async def submit_amazon_run(
 ) -> AmazonResearchRun:
     owner = _owner(principal)
     try:
-        body.source = normalize_source(body.mode, body.source)
+        if body.mode == "bestsellers":
+            body.source = normalize_board(body.source)
+            body.category = body.category or CategoryInputs()
+            children = {}
+            for source in body.category.subcategories:
+                url = normalize_board(source)
+                identity = board_identity(url)
+                if identity != board_identity(body.source):
+                    children.setdefault(identity, url)
+            body.category.subcategories = list(children.values())
+        else:
+            body.source = normalize_source(body.mode, body.source)
+            if body.category is not None:
+                raise AmazonSourceError("子类目和成本假设仅用于类目榜单任务。")
         body.keyword = body.keyword.strip()
         body.review_samples = ""
     except AmazonSourceError as exc:

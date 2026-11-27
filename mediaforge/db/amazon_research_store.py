@@ -39,6 +39,9 @@ def source_key(mode: str, url: str) -> str:
 
 def _fingerprint(inputs: AmazonResearchRunRequest) -> str:
     payload = inputs.model_dump(mode="json", exclude={"source", "submission_id"})
+    # 旧店铺活跃任务的指纹不包含后来新增的类目参数。
+    if inputs.mode == "store":
+        payload.pop("category", None)
     payload["source"] = source_key(inputs.mode, inputs.source)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -68,7 +71,7 @@ def _summary(row: Run) -> AmazonResearchRunSummary:
 def _view(row: Run) -> AmazonResearchRun:
     data = _summary(row)
     snapshot = AmazonResearchSnapshot.model_validate(row.snapshot)
-    if snapshot.product_archive is None and snapshot.evidence:
+    if data.mode == "store" and snapshot.product_archive is None and snapshot.evidence:
         # 兼容早期已保存的栏目，以当时的原始样本补算，采集时间保持原值。
         snapshot.product_archive = summarize_archive(archive(snapshot))
     return AmazonResearchRun(
@@ -173,14 +176,15 @@ async def retry_run(
                 item
                 for item in run.snapshot.evidence
                 if item.status in {"pending", "failed", "incomplete"}
-                and item.code not in {"sample_limit", "duplicate", "store_mismatch"}
+                and item.code not in {"sample_limit", "duplicate", "store_mismatch",
+                                      "board_mismatch"}
                 and (item_key is None or item.key == item_key)
             ]
             if target == "resume" and run.status not in {"queue_failed", "interrupted"}:
                 raise ResearchRunConflict("当前任务没有中断或派发失败。")
             if target == "failed":
                 if not retryable:
-                    raise ResearchRunConflict("当前没有可重试的采集栏目。")
+                    raise ResearchRunConflict("当前没有可重试的采集或分析项。")
                 for item in retryable:
                     item.status = "pending"
             inputs = run.inputs

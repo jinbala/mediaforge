@@ -9,13 +9,15 @@ import {
 
 const stageLabels: Record<string, string> = {
   queue: '派发任务', section: '采集店铺栏目', translation: '补充中文字段', report: '生成结果',
+  boards: '采集类目榜单', 'category-analysis': '生成类目专题',
 }
 const roleLabels: Record<string, string> = {
   home: '首页', new: '新品', popular: '畅销', about: '关于我们', collection: '合集', category: '栏目',
+  main: '主榜', child: '自动发现子榜', manual: '指定子榜',
 }
 const retryable = (item: AmazonEvidence) => (
   ['pending', 'failed', 'incomplete'].includes(item.status)
-  && !['sample_limit', 'duplicate', 'store_mismatch'].includes(item.code ?? '')
+  && !['sample_limit', 'duplicate', 'store_mismatch', 'board_mismatch'].includes(item.code ?? '')
 )
 
 export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
@@ -29,13 +31,14 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
   const active = activeAmazonRun(run)
   const pending = range.section_status_counts.pending
   const canRetry = !active && run.attempt < 6
+  const isStore = run.mode === 'store'
   return (
     <section className="space-y-3 rounded-lg border bg-card p-4" aria-label="调研任务进度">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="font-medium">店铺栏目采集</h3>
+        <h3 className="font-medium">{isStore ? '店铺栏目采集' : '类目榜单调研进度'}</h3>
         <span role="status" className="text-sm">
           {amazonRunLabels[run.status]} · {stageLabels[run.stage] ?? '恢复采集'}
-          {range.section_count > 0 && ' · ' + (range.section_count - pending) + '/' + range.section_count + ' 个栏目'}
+          {range.section_count > 0 && ' · ' + (range.section_count - pending) + '/' + range.section_count + (isStore ? ' 个栏目' : ' 个榜单')}
         </span>
       </div>
       <p className="break-all text-xs text-muted-foreground">
@@ -49,7 +52,7 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
             店铺首页 <ExternalLink className="size-3" aria-hidden="true" />
           </a>
         )}
-        {snapshot.evidence.length > 0 && (
+        {isStore && snapshot.evidence.length > 0 && (
           <Button variant="outline" size="sm" onClick={() => downloadAmazonFile(formatAmazonStoreSamples(run), run.id + '-samples.json', 'application/json')}>
             <ArrowDownToLine aria-hidden="true" />下载栏目采集记录
           </Button>
@@ -63,7 +66,7 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
 
       {range.section_count > 0 && (
         <p className="text-xs text-muted-foreground">
-          本次 {range.raw_card_count} 条栏目卡片 · {range.unique_asin_count} 个去重 ASIN
+          本次 {range.raw_card_count} 条{isStore ? '栏目' : '榜单'}卡片 · {range.unique_asin_count} 个去重 ASIN
         </p>
       )}
       {snapshot.translation_missing.length > 0 && (
@@ -86,7 +89,7 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
               </div>
               {item.title_zh && <p className="text-xs text-muted-foreground" lang="en">{item.title}</p>}
               <p className="mt-1 text-xs text-muted-foreground">
-                {(item.role && roleLabels[item.role]) || (item.kind === 'section' ? '栏目' : '搜索联想')}
+                {(item.role && roleLabels[item.role]) || (item.kind === 'section' ? '栏目' : item.kind === 'analysis' ? '专题分析' : '搜索联想')}
                 {' · ' + amazonStepLabels[item.status] + ' · ' + item.method}
                 {item.observed_count !== null && ' · ' + item.observed_count + ' 个样本'}
                 {item.collected_at && ' · ' + amazonTime(item.collected_at)}
@@ -106,12 +109,13 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
                       return (
                         <li key={product.asin} id={sampleId} tabIndex={-1} className="scroll-mt-6 rounded p-1 target:bg-muted">
                           <a href={product.url} target="_blank" rel="noreferrer" className="text-primary">{product.asin} · {product.title_zh ?? product.title}</a>
+                          {!isStore && ' · 原排名 ' + (product.rank ?? '未知')}
                           {' · 价 ' + (product.price ?? '未知') + (product.price_currency ? ' ' + product.price_currency : '')}
                           {product.price_label && '（' + product.price_label + '）'}
                           {' · 评分 ' + (product.rating ?? '未知') + ' · 评分数 ' + (product.rating_count ?? '未知')}
                           {(color || size) && ' · ' + [color, size].filter(Boolean).join(' / ')}
                           {product.image_url && <a href={product.image_url} target="_blank" rel="noreferrer" className="ml-2 text-primary">主图</a>}
-                          {snapshot.asin_sources[product.asin] && (
+                          {isStore && snapshot.asin_sources[product.asin] && (
                             <a href={'#' + archiveId} onClick={() => revealAmazonSample(archiveId)} className="ml-2 text-primary">返回归档 {product.asin}</a>
                           )}
                         </li>

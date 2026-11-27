@@ -12,6 +12,7 @@ from mediaforge.models.amazon_research_run import (
     AmazonResearchRun,
     AmazonStoreSampleScope,
 )
+from mediaforge.orchestrator.amazon_category import collect_category
 from mediaforge.rag.amazon_research import SUGGESTIONS, _fetch_suggestions, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import (
     archive,
@@ -193,6 +194,9 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         return busy
     snapshot = run.snapshot
     try:
+        if run.mode == "bestsellers":
+            await collect_category(run, token)
+            return False
         limited = await _collect_store(run, token)
         await store.checkpoint(run, token, "translation")
         await _localize(run)
@@ -236,9 +240,10 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         await store.checkpoint(
             run,
             token,
-            "section",
+            "boards" if run.mode == "bestsellers" else "section",
             status="partial_fail" if run.report else "failed",
-            error="栏目采集未完成，已保存可用样本。",
+            error="榜单采集未完成，已保存可用样本。" if run.mode == "bestsellers"
+            else "栏目采集未完成，已保存可用样本。",
         )
     logger.info(
         "Amazon research run={} attempt={} duration_ms={}",

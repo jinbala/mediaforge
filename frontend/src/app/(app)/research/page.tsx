@@ -18,7 +18,9 @@ import {
   Store,
 } from 'lucide-react'
 
+import { AmazonCategoryFields, AmazonCategoryReport } from '@/components/research/AmazonCategoryReport'
 import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
+import { AmazonSkills } from '@/components/research/AmazonSkills'
 import { AmazonScriptTools } from '@/components/research/AmazonScriptTools'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -27,6 +29,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api'
+import { readCategoryInputs, type CategoryInputs } from '@/lib/amazon-category'
 import {
   AMAZON_BRIEF_KEY,
   AMAZON_BRIEF_LIMIT,
@@ -298,16 +301,16 @@ export default function ResearchPage() {
     }
   }, [runningId])
 
-  async function runResearch(nextMode: ResearchMode, nextSource: string, samples = '') {
+  async function runResearch(nextMode: ResearchMode, nextSource: string, samples = '', category?: CategoryInputs) {
     if (loading || !nextSource.trim()) return
     setLoading(true)
     setError('')
     setPollError('')
     const body = { mode: nextMode, source: nextSource.trim(), keyword: keyword.trim(), review_samples: samples }
     try {
-      if (nextMode === 'store') {
+      if (nextMode !== 'product') {
         const result = await api.post<AmazonRun>('/v1/research/amazon/runs', {
-          ...body, submission_id: crypto.randomUUID(),
+          ...body, category: nextMode === 'bestsellers' ? category : undefined, submission_id: crypto.randomUUID(),
         })
         setRun(result)
         setLegacyReport(null)
@@ -335,7 +338,12 @@ export default function ResearchPage() {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    void runResearch(mode, source, mode === 'product' ? reviewSamples : '')
+    try {
+      const category = mode === 'bestsellers' ? readCategoryInputs(new FormData(event.currentTarget)) : undefined
+      void runResearch(mode, source, mode === 'product' ? reviewSamples : '', category)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '请检查类目调研参数。')
+    }
   }
 
   function openRelated(nextMode: ResearchMode, url: string) {
@@ -491,7 +499,7 @@ export default function ResearchPage() {
             <DialogContent className="w-[calc(100%-2rem)] gap-3 rounded-lg p-4 sm:p-6">
               <DialogHeader>
                 <DialogTitle>调研历史记录</DialogTitle>
-                <DialogDescription>店铺采集记录可在同一账号的其他设备打开。单品和类目结果保存在当前浏览器。</DialogDescription>
+                <DialogDescription>店铺和类目深调研可在同一账号的其他设备打开。旧单页结果保存在当前浏览器。</DialogDescription>
               </DialogHeader>
               {historyError && <p role="status" className="text-sm text-muted-foreground">{historyError}</p>}
               {historyBusy && <p role="status" className="text-sm text-muted-foreground">正在读取调研任务…</p>}
@@ -567,10 +575,12 @@ export default function ResearchPage() {
             />
           </details>
         )}
+        {mode === 'bestsellers' && <AmazonCategoryFields key={run?.mode === 'bestsellers' ? run.id : 'new-category'} saved={run?.mode === 'bestsellers' ? run.inputs.category : undefined} />}
         <p className="sr-only" role="status">{loading ? '正在读取 Amazon 页面' : report ? '调研报告已就绪' : ''}</p>
       </form>
 
       <AmazonScriptTools key={historyKey ?? 'anonymous'} historyKey={historyKey} keyword={keyword} source={mode === 'product' ? source : ''} />
+      <AmazonSkills key={'skills-' + (historyKey ?? 'anonymous')} />
 
       {error && (
         <div role="alert" className="flex gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -580,7 +590,8 @@ export default function ResearchPage() {
 
       {run && <AmazonRunDetails key={run.id} run={run} busy={loading} pollError={pollError} onRetry={(target, key) => void retryRun(target, key)} />}
 
-      {report && (
+      {run?.mode === 'bestsellers' && <AmazonCategoryReport run={run} onProduct={(url) => openRelated('product', url)} />}
+      {report && run?.mode !== 'bestsellers' && (
         <article className="space-y-5" aria-label="调研报告">
           <header className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
             <div className="min-w-0 flex-1 space-y-1">

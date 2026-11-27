@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from mediaforge.models.amazon_category import CategoryAnalysis, CategoryInputs, CategoryScope
 from mediaforge.models.amazon_research import (
     AmazonListing,
     AmazonResearchReport,
@@ -18,8 +19,9 @@ RetryTarget = Literal["resume", "failed"]
 
 
 class AmazonResearchRunRequest(AmazonResearchRequest):
-    mode: Literal["store"] = "store"
+    mode: Literal["store", "bestsellers"] = "store"
     submission_id: UUID | None = None
+    category: CategoryInputs | None = None
 
 
 class AmazonStoreSample(AmazonListing):
@@ -65,7 +67,7 @@ class AmazonStoreSampleScope(BaseModel):
 
 class AmazonEvidence(BaseModel):
     key: str
-    kind: Literal["section", "suggestions"]
+    kind: Literal["section", "suggestions", "board", "analysis"]
     url: str
     title: str
     title_zh: str | None = None
@@ -93,6 +95,8 @@ class AmazonResearchSnapshot(BaseModel):
     report_language: Literal["zh-CN"] = "zh-CN"
     store_root: str | None = None
     store_scope: AmazonStoreSampleScope | None = None
+    category_scope: CategoryScope | None = None
+    category_analysis: CategoryAnalysis | None = None
     evidence: list[AmazonEvidence] = Field(default_factory=list)
     asin_sources: dict[str, list[str]] = Field(default_factory=dict)
     product_archive: AmazonStoreArchive | None = None
@@ -104,7 +108,7 @@ class AmazonResearchSnapshot(BaseModel):
 
 class AmazonResearchRunSummary(BaseModel):
     id: UUID
-    mode: Literal["store"]
+    mode: Literal["store", "bestsellers"]
     source: str
     status: RunStatus
     stage: str
