@@ -251,7 +251,7 @@ export type ProductLinkPreview = {
 }
 
 export const api = {
-  get: <T>(path: string) => requestJson<T>(path, { method: 'GET' }),
+  get: <T>(path: string, options?: Pick<ApiRequestOptions, 'signal'>) => requestJson<T>(path, { ...options, method: 'GET' }),
   getFile: (path: string, signal?: AbortSignal) =>
     request(path, { method: 'GET', signal }, (response) => response.blob()),
   post: <T>(path: string, body: unknown, options?: { timeoutMs?: number }) =>

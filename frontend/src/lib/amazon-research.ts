@@ -154,3 +154,82 @@ export function formatAmazonReport(report: AmazonReport, brief: string) {
   if (report.warnings.length) lines.push('', '### 数据说明', ...report.warnings.map((warning) => '- ' + warning))
   return lines.join('\n') + '\n'
 }
+
+export type AmazonRunStatus = 'queued' | 'running' | 'done' | 'partial_fail' | 'failed' | 'queue_failed' | 'interrupted'
+export type AmazonStepStatus = 'pending' | 'success' | 'empty' | 'incomplete' | 'failed'
+export type AmazonRetryTarget = 'resume' | 'failed'
+export type AmazonRunSummary = {
+  id: string
+  mode: 'store'
+  source: string
+  canonical_source: string
+  status: AmazonRunStatus
+  stage: string
+  title: string | null
+  updated_at: string
+  created_at: string
+  attempt: number
+}
+export type AmazonEvidence = {
+  key: string
+  url: string
+  final_url: string | null
+  home_url: string | null
+  title: string
+  title_zh: string | null
+  status: AmazonStepStatus
+  kind: 'section' | 'suggestions'
+  method: string
+  collected_at: string | null
+  reason: string | null
+  code: string | null
+  attempts: number
+  duration_ms: number | null
+  observed_count: number | null
+  role: string | null
+  excerpt: string | null
+  products: (AmazonListing & { price_currency: string | null })[]
+}
+export type AmazonRun = AmazonRunSummary & {
+  error: string | null
+  inputs: { source: string; keyword: string }
+  report: AmazonReport | null
+  snapshot: {
+    version: number
+    site: 'US'
+    currency: 'USD'
+    source_language: string
+    report_language: string
+    store_root: string | null
+    translation_status: AmazonStepStatus
+    translation_missing: string[]
+    notes: string[]
+    evidence: AmazonEvidence[]
+    asin_sources: Record<string, string[]>
+  }
+}
+
+export const amazonRunLabels: Record<AmazonRunStatus, string> = {
+  queued: '等待队列', running: '进行中', done: '已完成', partial_fail: '部分完成',
+  failed: '采集失败', queue_failed: '队列派发失败', interrupted: '进度中断',
+}
+export const amazonStepLabels: Record<AmazonStepStatus, string> = {
+  pending: '待采集', success: '成功', empty: '空页', incomplete: '样本不完整', failed: '失败',
+}
+
+export function activeAmazonRun(run: AmazonRun) {
+  return ['queued', 'running'].includes(run.status)
+}
+
+export function amazonTime(time: string) {
+  return new Date(time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + '（上海）'
+}
+
+export function downloadAmazonFile(contents: string, filename: string, type = 'text/markdown') {
+  const url = URL.createObjectURL(new Blob([contents], { type: type + ';charset=utf-8' }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}

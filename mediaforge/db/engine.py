@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from mediaforge.config import get_settings
@@ -36,7 +37,7 @@ def get_engine(database_url: str | None = None) -> AsyncEngine:
     if key is None:
         key = 0
     engine = _engines.get(key)
-    if engine is not None and str(engine.url) == database_url:
+    if engine is not None and engine.url == make_url(database_url):
         return engine
     engine = _build_engine(database_url)
     _engines[key] = engine

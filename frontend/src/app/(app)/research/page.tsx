@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import {
@@ -18,6 +18,7 @@ import {
   Store,
 } from 'lucide-react'
 
+import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -29,13 +30,20 @@ import {
   AMAZON_BRIEF_KEY,
   AMAZON_BRIEF_LIMIT,
   AMAZON_BRIEF_PARAM,
+  activeAmazonRun,
   amazonHistoryKey,
+  amazonRunLabels,
+  amazonTime,
+  downloadAmazonFile,
   formatAmazonReport,
   groupAmazonListings,
   readAmazonHistory,
   saveAmazonHistory,
   type AmazonListing,
   type AmazonReport,
+  type AmazonRetryTarget,
+  type AmazonRun,
+  type AmazonRunSummary,
   type ResearchMode,
 } from '@/lib/amazon-research'
 import { cn } from '@/lib/utils'
@@ -44,7 +52,7 @@ import { useAuth } from '@/store/auth'
 const modes = [
   { value: 'product', label: '单品调研', hint: '卖点、排名与评论样本', sourceLabel: 'ASIN 或商品链接', placeholder: 'B0033SHO4Q 或 https://www.amazon.com/dp/…', icon: PackageSearch },
   { value: 'bestsellers', label: '类目榜单', hint: '对比榜单商品与页面价格', sourceLabel: 'Best Sellers 榜单链接', placeholder: 'https://www.amazon.com/gp/bestsellers/fashion', icon: ListOrdered },
-  { value: 'store', label: '品牌店铺', hint: '浏览店铺栏目和在售商品样本', sourceLabel: '品牌店铺或栏目链接', placeholder: 'https://www.amazon.com/stores/品牌/page/…', icon: Store },
+  { value: 'store', label: '品牌店铺', hint: '自动采集品牌店铺多个栏目', sourceLabel: '品牌店铺或栏目链接', placeholder: 'https://www.amazon.com/stores/品牌/page/…', icon: Store },
 ] as const
 
 // 三种调研结果共用商品缩略图。缺图或 CDN 加载失败时显示占位。
@@ -85,9 +93,27 @@ function listingSize(item: AmazonListing) {
   return compactSizes[label.toLowerCase()] ?? label
 }
 
-function StoreSizeGroup({ items, loading, onResearch }: {
+function ListingSources({ asin, run }: { asin: string; run: AmazonRun | null }) {
+  if (!run) return null
+  const sources = new Set(run.snapshot.asin_sources[asin] ?? [])
+  sources.add('product-' + asin)
+  const evidence = run.snapshot.evidence.filter((item) => sources.has(item.key))
+  if (!evidence.length) return null
+  return (
+    <div className="mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+      {evidence.map((item) => (
+        <a key={item.key} className="hover:text-primary" href={'#evidence-' + item.key}>
+          来源 · {item.title_zh ?? item.title}
+        </a>
+      ))}
+    </div>
+  )
+}
+
+function StoreSizeGroup({ items, loading, run, onResearch }: {
   items: AmazonListing[]
   loading: boolean
+  run: AmazonRun | null
   onResearch: (url: string) => void
 }) {
   const first = items[0]
@@ -124,6 +150,7 @@ function StoreSizeGroup({ items, loading, onResearch }: {
                 <span className="font-mono text-xs text-muted-foreground">{item.asin}</span>
                 <ExternalLink aria-hidden="true" className="size-3" />
               </a>
+              <ListingSources asin={item.asin} run={run} />
               <Button variant="ghost" size="sm" disabled={loading} aria-label={'调研 ' + item.asin} onClick={() => onResearch(item.url)}>
                 调研<ArrowRight aria-hidden="true" />
               </Button>
@@ -135,11 +162,12 @@ function StoreSizeGroup({ items, loading, onResearch }: {
   )
 }
 
-function Listings({ items, groups, ranked, loading, onResearch }: {
+function Listings({ items, groups, ranked, loading, run, onResearch }: {
   items: AmazonListing[]
   groups: AmazonListing[][]
   ranked: boolean
   loading: boolean
+  run: AmazonRun | null
   onResearch: (url: string) => void
 }) {
   const showStats = ranked || items.some((item) => item.price || item.rating || item.rating_count)
@@ -164,7 +192,7 @@ function Listings({ items, groups, ranked, loading, onResearch }: {
           {groups.map(([item, ...rest]) => rest.length ? (
             <tr key={item.asin}>
               <td colSpan={2 + Number(ranked) + (showStats ? 3 : 0)} className="p-0">
-                <StoreSizeGroup items={[item, ...rest]} loading={loading} onResearch={onResearch} />
+                <StoreSizeGroup items={[item, ...rest]} loading={loading} run={run} onResearch={onResearch} />
               </td>
             </tr>
           ) : (
@@ -179,6 +207,7 @@ function Listings({ items, groups, ranked, loading, onResearch }: {
                     {item.title !== item.asin && <span className="mt-0.5 block font-mono text-xs text-muted-foreground">{item.asin}</span>}
                   </span>
                 </a>
+                <ListingSources asin={item.asin} run={run} />
               </td>
               {showStats && (
                 <>
@@ -208,36 +237,74 @@ export default function ResearchPage() {
   const [source, setSource] = useState('')
   const [keyword, setKeyword] = useState('')
   const [reviewSamples, setReviewSamples] = useState('')
-  const [report, setReport] = useState<AmazonReport | null>(null)
+  const [legacyReport, setLegacyReport] = useState<AmazonReport | null>(null)
+  const [run, setRun] = useState<AmazonRun | null>(null)
+  const report = run ? run.report : legacyReport
   const [brief, setBrief] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [pollError, setPollError] = useState('')
   const [historyOpen, setHistoryOpen] = useState(false)
   const [history, setHistory] = useState<AmazonReport[]>([])
+  const [serverHistory, setServerHistory] = useState<AmazonRunSummary[]>([])
+  const [historyBusy, setHistoryBusy] = useState(false)
+  const [hasOlder, setHasOlder] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const activeMode = modes.find((item) => item.value === mode) ?? modes[0]
 
-  // 表单提交、点击店铺栏目和点击商品「调研」都走同一个接口。
+  const runningId = run && activeAmazonRun(run) ? run.id : null
+
+  useEffect(() => {
+    if (!runningId) return
+    const controller = new AbortController()
+    let timer: number
+    async function poll() {
+      try {
+        const updated = await api.get<AmazonRun>('/v1/research/amazon/runs/' + runningId, { signal: controller.signal })
+        if (controller.signal.aborted) return
+        setRun((current) => current?.id === updated.id ? updated : current)
+        setPollError('')
+        if (activeAmazonRun(updated)) timer = window.setTimeout(poll, 1800)
+      } catch {
+        if (!controller.signal.aborted) {
+          setPollError('暂时无法刷新进度，正在重连。也可从历史记录打开任务。')
+          timer = window.setTimeout(poll, 5000)
+        }
+      }
+    }
+    timer = window.setTimeout(poll, 1200)
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [runningId])
+
   async function runResearch(nextMode: ResearchMode, nextSource: string, samples = '') {
     if (loading || !nextSource.trim()) return
     setLoading(true)
     setError('')
+    setPollError('')
+    const body = { mode: nextMode, source: nextSource.trim(), keyword: keyword.trim(), review_samples: samples }
     try {
-      // 店铺报告还要等待翻译，给这类请求留出更长的等待时间。
-      const result = await api.post<AmazonReport>('/v1/research/amazon', {
-        mode: nextMode,
-        source: nextSource.trim(),
-        keyword: keyword.trim(),
-        review_samples: samples,
-      }, nextMode === 'store' ? { timeoutMs: 45000 } : undefined)
-      setReport(result)
-      setBrief(result.product?.image_brief ?? '')
-      if (historyKey) {
-        try {
-          saveAmazonHistory(historyKey, result)
-          setHistoryError('')
-        } catch {
-          setHistoryError('本次报告未能保存到浏览器历史。')
+      if (nextMode === 'store') {
+        const result = await api.post<AmazonRun>('/v1/research/amazon/runs', {
+          ...body, submission_id: crypto.randomUUID(),
+        })
+        setRun(result)
+        setLegacyReport(null)
+        setBrief('')
+      } else {
+        const result = await api.post<AmazonReport>('/v1/research/amazon', body)
+        setRun(null)
+        setLegacyReport(result)
+        setBrief(result.product?.image_brief ?? '')
+        if (historyKey) {
+          try {
+            saveAmazonHistory(historyKey, result)
+            setHistoryError('')
+          } catch {
+            setHistoryError('本次报告未能保存到浏览器历史。')
+          }
         }
       }
     } catch (caught) {
@@ -257,8 +324,21 @@ export default function ResearchPage() {
     setMode(nextMode)
     setSource(url)
     setReviewSamples('')
-    // React 状态会在下一次渲染更新，这里直接用刚点击的类型和地址发起请求。
     void runResearch(nextMode, url)
+  }
+
+  async function loadServerHistory(before?: string) {
+    setHistoryBusy(true)
+    setHistoryError('')
+    try {
+      const items = await api.get<AmazonRunSummary[]>('/v1/research/amazon/runs' + (before ? '?before=' + encodeURIComponent(before) : ''))
+      setServerHistory((previous) => before ? [...previous, ...items] : items)
+      setHasOlder(items.length === 30)
+    } catch {
+      setHistoryError('服务器调研历史暂时无法读取。')
+    } finally {
+      setHistoryBusy(false)
+    }
   }
 
   function toggleHistory(open: boolean) {
@@ -268,31 +348,65 @@ export default function ResearchPage() {
       setHistory(readAmazonHistory(historyKey))
     } catch {
       setHistory([])
-      setHistoryError('暂时无法读取浏览器中的历史记录。')
     }
+    void loadServerHistory()
   }
 
   function restoreHistory(saved: AmazonReport) {
-    // 恢复当时的表单和报告快照，用户可查看原结果，也可再点「开始调研」更新。
+    // 浏览器旧快照按原格式打开，服务器任务可以在账号的其他设备恢复。
+    setRun(null)
     setMode(saved.mode)
     setSource(saved.source_url)
     setKeyword(saved.keyword ?? '')
     setReviewSamples(saved.product?.reviews.filter((review) => review.source === 'manual').map((review) => review.text).join('\n') ?? '')
-    setReport(saved)
+    setLegacyReport(saved)
     setBrief(saved.product?.image_brief ?? '')
     setError('')
     setHistoryOpen(false)
   }
 
+  async function openRun(id: string) {
+    setLoading(true)
+    try {
+      const saved = await api.get<AmazonRun>('/v1/research/amazon/runs/' + id)
+      setRun(saved)
+      setLegacyReport(null)
+      setMode(saved.mode)
+      setSource(saved.source)
+      setKeyword(saved.inputs.keyword)
+      setReviewSamples('')
+      setBrief('')
+      setPollError('')
+      setError('')
+      setHistoryOpen(false)
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : '无法打开调研任务。'
+      setError(message)
+      setHistoryError(message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function retryRun(target: AmazonRetryTarget, key?: string) {
+    if (!run || loading) return
+    setLoading(true)
+    setError('')
+    try {
+      const response = await api.post<AmazonRun>('/v1/research/amazon/runs/' + run.id + '/retry?target=' + target + (key ? '&item_key=' + encodeURIComponent(key) : ''), {})
+      setRun(response)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '无法恢复调研。')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   function downloadReport(currentReport: AmazonReport) {
-    // 在浏览器里导出报告，使用用户当前编辑过的图片需求。
-    const contents = formatAmazonReport(currentReport, brief)
-    const url = URL.createObjectURL(new Blob([contents], { type: 'text/markdown;charset=utf-8' }))
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = 'amazon-research-' + (currentReport.product?.asin ?? currentReport.mode) + '.md'
-    anchor.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    downloadAmazonFile(
+      formatAmazonReport(currentReport, brief),
+      'amazon-research-' + (currentReport.product?.asin ?? currentReport.mode) + '.md',
+    )
   }
 
   function sendBrief() {
@@ -357,10 +471,28 @@ export default function ResearchPage() {
             <DialogContent className="w-[calc(100%-2rem)] gap-3 rounded-lg p-4 sm:p-6">
               <DialogHeader>
                 <DialogTitle>调研历史记录</DialogTitle>
-                <DialogDescription>当前浏览器保留最近 20 份报告。</DialogDescription>
+                <DialogDescription>店铺采集记录可在同一账号的其他设备打开。单品和类目结果保存在当前浏览器。</DialogDescription>
               </DialogHeader>
               {historyError && <p role="status" className="text-sm text-muted-foreground">{historyError}</p>}
+              {historyBusy && <p role="status" className="text-sm text-muted-foreground">正在读取调研任务…</p>}
+              {serverHistory.length > 0 && (
+                <ul className="max-h-[40vh] min-w-0 divide-y overflow-y-auto rounded-md border">
+                  {serverHistory.map((item) => (
+                    <li key={item.id}>
+                      <button type="button" disabled={loading} className="block w-full break-words px-3 py-2.5 text-left text-sm hover:bg-muted/50" onClick={() => void openRun(item.id)}>
+                        {item.title ?? item.source}
+                        <span className="mt-1 block text-xs text-muted-foreground">
+                          {modes.find((entry) => entry.value === item.mode)?.label} · {amazonRunLabels[item.status]} · {amazonTime(item.created_at)}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {hasOlder && <Button variant="outline" size="sm" disabled={historyBusy} onClick={() => void loadServerHistory(serverHistory.at(-1)?.created_at)}>加载更早记录</Button>}
               {history.length ? (
+                <>
+                <p className="text-sm font-medium">本浏览器旧快照</p>
                 <ul className="max-h-[55vh] min-w-0 divide-y overflow-y-auto rounded-md border">
                   {history.map((saved) => (
                     <li key={`${saved.mode}:${saved.source_url}`}>
@@ -370,7 +502,7 @@ export default function ResearchPage() {
                           <span className="mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
                             <span>{modes.find((item) => item.value === saved.mode)?.label}</span>
                             {saved.product && <span className="font-mono">{saved.product.asin}</span>}
-                            <time dateTime={saved.collected_at}>{new Date(saved.collected_at).toLocaleString('zh-CN')}</time>
+                            <time dateTime={saved.collected_at}>{amazonTime(saved.collected_at)}</time>
                           </span>
                         </span>
                         <ArrowRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
@@ -378,7 +510,8 @@ export default function ResearchPage() {
                     </li>
                   ))}
                 </ul>
-              ) : !historyError && (
+                </>
+              ) : !historyError && !historyBusy && !serverHistory.length && (
                 <p className="rounded-md border px-3 py-6 text-center text-sm text-muted-foreground">暂无调研记录</p>
               )}
             </DialogContent>
@@ -423,14 +556,17 @@ export default function ResearchPage() {
         </div>
       )}
 
+      {run && <AmazonRunDetails key={run.id} run={run} busy={loading} pollError={pollError} onRetry={(target, key) => void retryRun(target, key)} />}
+
       {report && (
         <article className="space-y-5" aria-label="调研报告">
           <header className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
             <div className="min-w-0 flex-1 space-y-1">
               <h2 className="break-words text-lg font-semibold">{report.title_zh ?? report.title}</h2>
+              {report.title_zh && <p className="break-words text-xs text-muted-foreground" lang="en">{report.title}</p>}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <a href={report.source_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-primary">查看 Amazon 来源 <ExternalLink className="h-3 w-3" /></a>
-                <time dateTime={report.collected_at}>{new Date(report.collected_at).toLocaleString('zh-CN')}</time>
+                <time dateTime={report.collected_at}>{amazonTime(report.collected_at)}</time>
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -522,11 +658,11 @@ export default function ResearchPage() {
                   ? `${listingGroups.length} 组 · ${report.listings.length} 个 ASIN`
                   : `${report.listings.length} 件`}
               </h3>
-              <Listings items={report.listings} groups={listingGroups} ranked={report.mode === 'bestsellers'} loading={loading} onResearch={(url) => openRelated('product', url)} />
+              <Listings items={report.listings} groups={listingGroups} ranked={report.mode === 'bestsellers'} loading={loading} run={run} onResearch={(url) => openRelated('product', url)} />
             </section>
           )}
 
-          {report.store_pages.length > 0 && (
+          {report.store_pages.length > 0 && !run && (
             <section className="rounded-lg border bg-card p-4">
               <h3 className="font-medium">店铺栏目 · {report.store_pages.length} 个</h3>
               <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">

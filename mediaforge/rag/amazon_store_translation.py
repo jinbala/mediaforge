@@ -17,11 +17,14 @@ _translations: OrderedDict[str, str] = OrderedDict()
 
 # 常见栏目名用固定译法，词表和缓存都未命中的名称交给模型翻译。
 _GLOSSARY = {
+    "about": "关于我们",
+    "about us": "关于我们",
     "best seller": "畅销商品",
     "best sellers": "畅销商品",
     "biker shorts": "骑行短裤",
     "capris": "七分裤",
     "clearance": "清仓商品",
+    "collections": "商品合集",
     "featured deals": "精选优惠",
     "fleece lined leggings": "加绒打底裤",
     "fleece lined tights": "加绒紧身裤",
@@ -138,3 +141,31 @@ async def localize_amazon_store(report: AmazonResearchReport) -> None:
         report.title_zh = f"{brand} 品牌店铺"
     if any(title not in translations for title in titles):
         report.warnings.append("部分店铺内容暂未取得中文译文，已保留原文。可重新调研。")
+
+
+async def localize_research_fields(items: list, colors: list) -> list[str]:
+    # 复用原词表和已配置翻译模型。每次最多两批各 35 个未翻译字段，余下字段可按原文补译。
+    def needs_translation(text: str | None) -> bool:
+        return bool(text and re.search(r"[A-Za-z]", text) and not _HAN.search(text))
+
+    fields = [(item, "title", "title_zh") for item in items]
+    fields.extend((item, "color", "color_zh") for item in colors)
+    known = {}
+    pending = {}
+    for item, field, translated in fields:
+        source = getattr(item, field)
+        if not needs_translation(source) or source == getattr(item, "asin", None):
+            continue
+        if previous := getattr(item, translated):
+            known[source] = previous
+        elif lookup := _GLOSSARY.get(re.sub(r"[\s-]+", " ", source.casefold())) or _translations.get(source):
+            known[source] = lookup
+        else:
+            pending[source] = None
+    batch = [text for text in pending if text not in known][:70]
+    for start in range(0, len(batch), 35):
+        known.update(await _translate_titles(batch[start:start + 35]))
+    for item, field, translated in fields:
+        if translation := known.get(getattr(item, field)):
+            setattr(item, translated, translation)
+    return [text for text in pending if text not in known]

@@ -185,3 +185,17 @@ def process_sku(
         if not final:
             raise self.retry(exc=exc, countdown=retry_in)
         raise
+
+
+@celery_app.task(
+    bind=True, name="mediaforge.orchestrator.tasks.process_amazon_research",
+    acks_late=True, reject_on_worker_lost=True, soft_time_limit=470, time_limit=500,
+)
+def process_amazon_research(self: Task, run_id: str, attempt: int) -> None:
+    from uuid import UUID
+
+    from mediaforge.orchestrator.amazon_research import process_research
+
+    if _run_async(process_research(UUID(run_id), attempt)):
+        # 工作进程异常退出时，Celery 可能在数据库租约到期前先投递同一个任务。
+        raise self.retry(countdown=125, max_retries=4)

@@ -1,10 +1,31 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from datetime import datetime
+from uuid import UUID
 
-from mediaforge.gateway.dependencies import get_tenant_only
+from fastapi import APIRouter, Depends, HTTPException, Request
+from kombu.exceptions import OperationalError
+from loguru import logger
+from redis.exceptions import RedisError
+from starlette.concurrency import run_in_threadpool
+
+from mediaforge.db import amazon_research_store as store
+from mediaforge.gateway.dependencies import get_current_principal, get_tenant_only
 from mediaforge.gateway.middleware.rate_limit import limiter
 from mediaforge.models.amazon_research import AmazonResearchReport, AmazonResearchRequest
+from mediaforge.models.amazon_research_run import (
+    AmazonResearchRun,
+    AmazonResearchRunRequest,
+    AmazonResearchRunSummary,
+    RetryTarget,
+)
 from mediaforge.models.tenant import Tenant
-from mediaforge.rag.amazon_research import AmazonFetchError, AmazonSourceError, run_amazon_research
+from mediaforge.models.user import User
+from mediaforge.orchestrator.tasks import process_amazon_research
+from mediaforge.rag.amazon_research import (
+    AmazonFetchError,
+    AmazonSourceError,
+    normalize_source,
+    run_amazon_research,
+)
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
 
@@ -16,10 +37,98 @@ async def research_amazon(
     body: AmazonResearchRequest,
     _tenant: Tenant = Depends(get_tenant_only),
 ) -> AmazonResearchReport:
-    # 由 Gateway 校验租户并限流，调研交给 rag 层，按输入错误和上游失败返回对应状态码。
+    # 原有单次查询入口保留，深调研与跨设备快照走新任务资源。
     try:
         return await run_amazon_research(body)
     except AmazonSourceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except AmazonFetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _owner(principal: tuple[User, Tenant]) -> tuple[UUID, UUID]:
+    user, tenant = principal
+    # 没有创建账号的旧式 API Key 沿用原查询权限，归属到个人历史需要真实账号。
+    if user.user_id.int == 0:
+        raise HTTPException(status_code=403, detail="调研历史需通过账号或账号创建的 API Key 访问。")
+    return tenant.tenant_id, user.user_id
+
+
+async def _owned_run(owner: tuple[UUID, UUID], run_id: UUID) -> AmazonResearchRun:
+    run = await store.get_run(owner, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="未找到调研任务。")
+    return run
+
+
+async def _enqueue(run: AmazonResearchRun, owner: tuple[UUID, UUID]) -> AmazonResearchRun:
+    # 先提交数据库，再通知 worker，派发失败也保留可恢复的任务标识。
+    try:
+        await run_in_threadpool(
+            process_amazon_research.apply_async,
+            args=(str(run.id), run.attempt),
+            task_id=f"amazon-research-{run.id}-{run.attempt}",
+            queue="low",
+            retry=False,
+            ignore_result=True,
+        )
+    except (OperationalError, RedisError, OSError) as exc:
+        logger.warning("Amazon research run={} phase=queue error={}", run.id, type(exc).__name__)
+        await store.record_queue_failure(run.id, run.attempt)
+    return await _owned_run(owner, run.id)
+
+
+@router.post("/amazon/runs", status_code=202, response_model=AmazonResearchRun)
+@limiter.limit("8/minute")
+async def submit_amazon_run(
+    request: Request,
+    body: AmazonResearchRunRequest,
+    principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> AmazonResearchRun:
+    owner = _owner(principal)
+    try:
+        body.source = normalize_source(body.mode, body.source)
+        body.keyword = body.keyword.strip()
+        body.review_samples = ""
+    except AmazonSourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        run, created = await store.submit_run(owner, body)
+    except store.ResearchRunConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return await _enqueue(run, owner) if created else run
+
+
+@router.get("/amazon/runs", response_model=list[AmazonResearchRunSummary])
+async def history_amazon_runs(
+    before: datetime | None = None,
+    principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> list[AmazonResearchRunSummary]:
+    return await store.list_runs(_owner(principal), before)
+
+
+@router.get("/amazon/runs/{run_id}", response_model=AmazonResearchRun)
+async def get_amazon_run(
+    run_id: UUID,
+    principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> AmazonResearchRun:
+    return await _owned_run(_owner(principal), run_id)
+
+
+@router.post("/amazon/runs/{run_id}/retry", status_code=202, response_model=AmazonResearchRun)
+@limiter.limit("8/minute")
+async def retry_amazon_run(
+    request: Request,
+    run_id: UUID,
+    target: RetryTarget,
+    item_key: str | None = None,
+    principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> AmazonResearchRun:
+    owner = _owner(principal)
+    try:
+        run, queued = await store.retry_run(owner, run_id, target, item_key)
+    except store.ResearchRunConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if run is None:
+        raise HTTPException(status_code=404, detail="未找到调研任务。")
+    return await _enqueue(run, owner) if queued else run

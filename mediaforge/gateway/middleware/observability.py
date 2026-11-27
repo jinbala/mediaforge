@@ -10,7 +10,7 @@ from mediaforge.logging import trace_id_var
 
 # 这些接口的日志跳过请求和响应正文，避免写入供应商凭证与用户粘贴的评论样本。
 _SKIP_BODY_PATHS: set[str] = {"/api/v1/image-provider", "/api/v1/research/amazon"}
-_SKIP_BODY_PREFIXES: tuple[str, ...] = ("/api/v1/image-provider/",)
+_SKIP_BODY_PREFIXES: tuple[str, ...] = ("/api/v1/image-provider/", "/api/v1/research/amazon/")
 
 # Truncate large bodies to this many chars in the log
 _BODY_MAX_CHARS = 2000

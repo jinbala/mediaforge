@@ -73,6 +73,11 @@ class AmazonSourceError(ValueError):
 class AmazonFetchError(Exception):
     """The public source could not supply a usable response."""
 
+    def __init__(self, message: str, code: str = "unreadable", url: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.url = url
+
 
 def normalize_source(mode: ResearchMode, source: str) -> str:
     # 按调研类型验证美国站地址并重建链接，去掉追踪参数，只保留榜单第二页参数。
@@ -295,23 +300,25 @@ def _store_product_cards(soup: BeautifulSoup) -> dict[str, dict]:
                 asin = product.get("asin")
                 if isinstance(asin, str) and ASIN.fullmatch(asin):
                     card = by_asin.setdefault(asin.upper(), {})
-                    for field in ("productImages", "title", "twisterVariations"):
+                    for field in (
+                        "productImages", "title", "twisterVariations", "price",
+                        "starRating", "customerReviews", "reviews", "priceToPay",
+                        "marketplaceOfferSummary", "customerReviewsSummary", "byLine", "productCategory",
+                    ):
                         if isinstance(value := product.get(field), dict):
                             card.setdefault(field, value)
     return by_asin
 
 
-def _store_variant(card: dict, asin: str) -> AmazonStoreVariant | None:
-    twister, title = card.get("twisterVariations"), card.get("title")
-    if not isinstance(twister, dict) or not isinstance(title, dict):
+def _variant_coordinates(card: dict) -> tuple[list, list, dict] | None:
+    twister = card.get("twisterVariations")
+    if not isinstance(twister, dict):
         return None
-    name = title.get("displayString")
     dimensions = twister.get("dimensionKeys")
     values = twister.get("dimensionValues")
     variations = twister.get("variations")
     if not (
-        isinstance(name, str) and name.strip() and isinstance(dimensions, list)
-        and isinstance(values, list) and len(dimensions) == len(values)
+        isinstance(dimensions, list) and isinstance(values, list) and len(dimensions) == len(values)
         and isinstance(variations, list)
     ):
         return None
@@ -320,8 +327,6 @@ def _store_variant(card: dict, asin: str) -> AmazonStoreVariant | None:
         dimension.get("symbol") if isinstance(dimension, dict) else None
         for dimension in dimensions
     ]
-    if symbols.count("size_name") != 1:
-        return None
     # 每个 ASIN 的 choices 是各规格维度的选项下标，例如 [颜色下标, 尺码下标]。
     coordinates = {}
     for variant in variations:
@@ -338,8 +343,17 @@ def _store_variant(card: dict, asin: str) -> AmazonStoreVariant | None:
             )
         ):
             coordinates[variant_asin.upper()] = choices
+    return symbols, values, coordinates
+
+
+def _store_variant(card: dict, asin: str) -> AmazonStoreVariant | None:
+    title, specs = card.get("title"), _variant_coordinates(card)
+    name = title.get("displayString") if isinstance(title, dict) else None
+    if specs is None or not isinstance(name, str) or not name.strip():
+        return None
+    symbols, values, coordinates = specs
     selected = coordinates.get(asin)
-    if selected is None:
+    if selected is None or symbols.count("size_name") != 1:
         return None
     size_index = symbols.index("size_name")
     # 去掉尺码后其余规格都相同才归为一组，配色或其他规格不同的商品各自显示。
@@ -379,7 +393,9 @@ def _store_main_image(product_images: dict) -> str | None:
     return None
 
 
-def _parse_listings(soup: BeautifulSoup, mode: ResearchMode) -> list[AmazonListing]:
+def _parse_listings(
+    soup: BeautifulSoup, mode: ResearchMode, *, limit: int = 30, store_cards: dict | None = None,
+) -> list[AmazonListing]:
     listings: dict[str, AmazonListing] = {}
     if mode == "bestsellers":
         for item in soup.select(".zg-grid-general-faceout, .zg-item-immersion"):
@@ -407,10 +423,10 @@ def _parse_listings(soup: BeautifulSoup, mode: ResearchMode) -> list[AmazonListi
                     rank=_first_text(item, ".zg-bdg-text")
                     or _first_text(item.parent, ".zg-bdg-text"),
                 )
-            if len(listings) >= 30:
+            if len(listings) >= limit:
                 break
     else:
-        by_asin = _store_product_cards(soup)
+        by_asin = _store_product_cards(soup) if store_cards is None else store_cards
         for link in soup.select('a[href*="/dp/"], a[href*="/gp/product/"]'):
             if (url := _linked_source("product", link)) is None:
                 continue
@@ -435,12 +451,13 @@ def _parse_listings(soup: BeautifulSoup, mode: ResearchMode) -> list[AmazonListi
                 asin=asin, title=title or asin, url=url, image_url=image_url,
                 store_variant=_store_variant(card, asin),
             )
-            if len(listings) >= 30:
+            if len(listings) >= limit:
                 break
     return list(listings.values())
 
 
-def _store_pages(soup: BeautifulSoup, current_url: str) -> list[AmazonStorePage]:
+def _store_pages(soup: BeautifulSoup | Tag, current_url: str, *, limit: int = 30,
+) -> list[AmazonStorePage]:
     # 同一栏目可能在导航的多个位置出现，按栏目 ID 去重并跳过当前栏目。
     pages: dict[str, AmazonStorePage] = {}
     current_id = urlsplit(current_url).path.rsplit("/", 1)[-1].lower()
@@ -451,7 +468,7 @@ def _store_pages(soup: BeautifulSoup, current_url: str) -> list[AmazonStorePage]
         title = _text(link, 150)
         if title and page_id != current_id and page_id not in pages:
             pages[page_id] = AmazonStorePage(title=title, url=url)
-        if len(pages) >= 30:
+        if len(pages) >= limit:
             break
     return list(pages.values())
 
@@ -515,14 +532,19 @@ async def _fetch_page(
                         url = normalize_source(mode, urljoin(url, location))
                         continue
                     if response.status_code == 404:
-                        raise AmazonFetchError("没有找到该 Amazon 页面，请核对来源链接或 ASIN。")
+                        raise AmazonFetchError("没有找到该 Amazon 页面，请核对来源链接或 ASIN。", "not_found", url)
+                    if response.status_code in {401, 403, 429, 503}:
+                        code = "blocked" if response.status_code in {401, 403} else "throttled"
+                        raise AmazonFetchError(f"Amazon 页面暂不可访问（HTTP {response.status_code}）。", code, url)
                     response.raise_for_status()
                     return url, await _read_body(response, MAX_PAGE_BYTES)
     except AmazonSourceError as exc:
-        raise AmazonFetchError("Amazon 要求登录或跳转到了其他页面，请核对来源链接。") from exc
-    except (httpx.HTTPError, TimeoutError) as exc:
-        raise AmazonFetchError("Amazon 暂时无法访问，请稍后重试。") from exc
-    raise AmazonFetchError("Amazon 页面跳转次数过多，请使用最终页面链接。")
+        raise AmazonFetchError("Amazon 要求登录或跳转到了其他页面，请核对来源链接。", "redirect", url) from exc
+    except (httpx.TimeoutException, TimeoutError) as exc:
+        raise AmazonFetchError("读取 Amazon 页面超时。", "timeout", url) from exc
+    except httpx.HTTPError as exc:
+        raise AmazonFetchError("Amazon 暂时无法访问，请稍后重试。", "network", url) from exc
+    raise AmazonFetchError("Amazon 页面跳转次数过多，请使用最终页面链接。", "redirect", url)
 
 
 async def _fetch_suggestions(client: httpx.AsyncClient, keyword: str) -> list[str] | None:
@@ -549,18 +571,7 @@ async def run_amazon_research(request: AmazonResearchRequest) -> AmazonResearchR
     keyword = request.keyword.strip()
     if _research_slots.locked():
         raise AmazonFetchError("当前调研请求较多，请稍后重试。")
-    async with _research_slots, httpx.AsyncClient(
-        follow_redirects=False,
-        trust_env=False,
-        timeout=10,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-    ) as client:
+    async with _research_slots, amazon_public_client() as client:
         if keyword:
             # 联想词是可选补充，可与页面并行读取，联想接口故障时仍返回页面报告。
             page, suggestions = await asyncio.gather(
@@ -588,3 +599,22 @@ async def run_amazon_research(request: AmazonResearchRequest) -> AmazonResearchR
         else:
             report.suggestions = suggestions
     return report
+
+
+def amazon_public_client() -> httpx.AsyncClient:
+    client = httpx.AsyncClient(
+        follow_redirects=False,
+        trust_env=False,
+        timeout=10,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+    # 只设置本次请求的公开显示偏好。Amazon 仍可能按访问地返回其他显示币种或配送范围。
+    client.cookies.set("i18n-prefs", "USD", domain="www.amazon.com")
+    client.cookies.set("lc-main", "en_US", domain="www.amazon.com")
+    return client

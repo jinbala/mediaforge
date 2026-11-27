@@ -302,3 +302,35 @@ class AuditLogTable(Base):
         Index("idx_audit_tenant_ts", "tenant_id", "created_at"),
         Index("idx_audit_user_ts", "user_id", "created_at"),
     )
+
+
+class AmazonResearchRunTable(Base):
+    __tablename__ = "amazon_research_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), nullable=False)
+    mode = Column(String(20), nullable=False)
+    source = Column(Text, nullable=False)
+    canonical_source = Column(Text, nullable=False)
+    active_key = Column(String(64), nullable=True)
+    submission_id = Column(UUID(as_uuid=True), nullable=True)
+    title = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False)
+    stage = Column(String(20), nullable=False)
+    attempt = Column(Integer, nullable=False, default=1)
+    lease_token = Column(UUID(as_uuid=True), nullable=True)
+    lease_until = Column(DateTime(timezone=True), nullable=False)
+    error = Column(Text, nullable=True)
+    inputs = Column(JSON, nullable=False)
+    snapshot = Column(JSON, nullable=False)
+    report = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_amazon_run_owner_time", "tenant_id", "user_id", "created_at"),
+        Index("uq_amazon_run_active", "tenant_id", "user_id", "active_key", unique=True),
+        Index("uq_amazon_run_submission", "tenant_id", "user_id", "submission_id", unique=True),
+    )
