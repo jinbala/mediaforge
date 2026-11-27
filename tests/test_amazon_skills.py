@@ -153,7 +153,7 @@ async def test_authorization_catalog_and_shared_fba():
         assert (await client.post(BASE + "/REQ-059", json={})).status_code == 401
         assert not _should_log_body(BASE + "/REQ-048")
         catalog = (await client.get(BASE, headers=AUTH)).json()
-        assert [row["req"] for row in catalog] == [f"REQ-{i:03}" for i in range(45, 61)]
+        assert [row["req"] for row in catalog] == [f"REQ-{i:03}" for i in range(45, 96)]
         calculator = await client.post("/api/v1/research/amazon/tools", headers=AUTH, json=FBA)
         skill = await client.post(
             BASE + "/REQ-059",

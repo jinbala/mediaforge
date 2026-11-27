@@ -1,4 +1,5 @@
 from mediaforge.models.amazon_skills import SkillDefinition, SkillField
+from mediaforge.workers.amazon_skill_advanced_definitions import ADVANCED
 
 
 # 表单与后端用同一份字段定义，避免增加技能时前端字段和服务校验不同步。
@@ -187,3 +188,5 @@ SKILLS = {
         ),
     )
 }
+
+SKILLS.update(ADVANCED)
