@@ -45,6 +45,7 @@ from mediaforge.rag.amazon_store_collection import (
     page_id,
     section_step,
 )
+from mediaforge.rag.amazon_store_growth import build_store_growth, growth_review_targets
 from mediaforge.rag.amazon_store_translation import (
     DetailField,
     TranslationInputs,
@@ -357,6 +358,32 @@ async def _report_revenue(
             await store.checkpoint(run, token, "revenue")
 
 
+async def _report_growth(
+    run: AmazonResearchRun, token: UUID, products: list[AmazonStoreSample]
+) -> None:
+    snapshot = run.snapshot
+    cached = list(snapshot.competition.listings.values()) if snapshot.competition else []
+    if snapshot.revenue:
+        cached.extend(row.listing for row in snapshot.revenue.samples if row.listing)
+    if snapshot.growth:
+        cached.extend(snapshot.growth.review_details.values())
+    saved = {
+        item.asin: item for item in cached
+        if not item.problem and item.review_sample_count is not None
+    }
+    targets = growth_review_targets(snapshot)
+    reviews = {item.asin: saved[item.asin] for item in targets if item.asin in saved}
+    pending = [item.asin for item in targets if item.asin not in reviews]
+    snapshot.growth = build_store_growth(snapshot, products, reviews)
+    if pending:
+        # 只读取低评分优先样本的缺失详情。先保存已有的机会、风险和来源。
+        await store.checkpoint(run, token, "growth")
+        async with amazon_public_client() as client:
+            rows = await asyncio.gather(*(collect_market_listing(client, asin) for asin in pending))
+        reviews.update((item.asin, item) for item in rows)
+        snapshot.growth = build_store_growth(snapshot, products, reviews)
+
+
 async def process_research(run_id: UUID, attempt: int) -> bool:
     started = monotonic()
     run, token, busy = await store.claim_run(run_id, attempt)
@@ -398,6 +425,9 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         snapshot.product_matrix = build_product_matrix(snapshot, listings)
         if run.stage != "retry-translation":
             await _report_revenue(run, token, listings)
+            await _report_growth(run, token, listings)
+        elif snapshot.growth:
+            snapshot.growth = build_store_growth(snapshot, listings, snapshot.growth.review_details)
         sections = [
             item
             for item in snapshot.evidence
@@ -416,6 +446,10 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
             or any(
                 item.listing and item.listing.problem
                 for item in (snapshot.revenue.samples if snapshot.revenue else [])
+            )
+            or any(
+                item.problem for item in (snapshot.growth.review_details.values() if snapshot.growth
+                                          else [])
             )
         )
         status = "failed" if not useful else "partial_fail" if partial else "done"

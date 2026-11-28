@@ -162,6 +162,7 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
   }
   if (run?.snapshot.competition) lines.push(...formatAmazonCompetition(run.snapshot.competition, escape))
   if (run?.snapshot.revenue) lines.push(...formatAmazonRevenue(run, run.snapshot.revenue, escape))
+  if (run?.snapshot.growth) lines.push(...formatAmazonGrowth(run.snapshot.growth, escape))
   const archive = run?.snapshot.product_archive
   if (archive) {
     lines.push('', '### 商品归档', '', ...amazonArchiveCounts(archive).map(([label, count]) => '- ' + label + ' · ' + count))
@@ -422,6 +423,28 @@ export type AmazonStoreRevenue = {
   section_monthly: Record<string, AmazonRevenueTotals>
 }
 
+export type AmazonGrowthFinding = {
+  key: string
+  title: string
+  priority: 'high' | 'medium' | 'low'
+  observed: string
+  hypothesis: string
+  action: string
+  sources: {
+    label: string
+    url: string
+    collected_at: string | null
+    asin: string | null
+    section: string | null
+  }[]
+}
+
+export type AmazonStoreGrowth = {
+  opportunities: AmazonGrowthFinding[]
+  risks: AmazonGrowthFinding[]
+  plan: { day: 30 | 60 | 90; action: string; findings: string[] }[]
+}
+
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
   inputs: { source: string; keyword: string; review_samples: string; site?: 'US'; category?: CategoryInputs | null; product_costs?: ProductCosts | null; context?: AmazonResearchContext | null; supplemental_notes?: string }
@@ -452,6 +475,7 @@ export type AmazonRun = AmazonRunSummary & {
     lifecycle?: AmazonStoreLifecycle | null
     competition?: AmazonStoreCompetition | null
     revenue?: AmazonStoreRevenue | null
+    growth?: AmazonStoreGrowth | null
   }
 }
 
@@ -811,5 +835,41 @@ function formatAmazonRevenue(run: AmazonRun, revenue: AmazonStoreRevenue, escape
     }),
     '', '#### 栏目贡献',
     ...sections.map(({ section, monthly }) => `- ${link(section)} · ${amazonRevenueSummary(monthly, revenue.annual_months)}`),
+  ]
+}
+
+export const amazonGrowthPriority = { high: '高', medium: '中', low: '低' } as const
+
+export function amazonGrowthFindingGroups(growth: AmazonStoreGrowth) {
+  return [
+    { title: '增长机会', findings: growth.opportunities },
+    { title: '风险与待验证项', findings: growth.risks },
+  ]
+}
+
+export function amazonGrowthSourcesLabel(source: AmazonGrowthFinding['sources'][number]) {
+  return `${source.label}${source.asin ? ' · ' + source.asin : ''}`
+}
+
+function formatAmazonGrowth(growth: AmazonStoreGrowth, escape: (value: string) => string) {
+  const titles = new Map([...growth.opportunities, ...growth.risks].map((row) => [row.key, row.title]))
+  return [
+    '', '### 增长机会与风险',
+    ...amazonGrowthFindingGroups(growth).flatMap(({ title, findings }) => [
+      '', '#### ' + title,
+      ...findings.flatMap((item) => [
+        '', `- ${item.title} · 优先级 ${amazonGrowthPriority[item.priority]}`,
+        '  - 公开观察 · ' + escape(item.observed),
+        '  - 待验证 · ' + escape(item.hypothesis),
+        '  - 核查行动 · ' + escape(item.action),
+        ...item.sources.map((source) => (
+          `  - [${escape(amazonGrowthSourcesLabel(source))}](${source.url}) · ${source.collected_at ? amazonTime(source.collected_at) : '采集时间未知'}`
+        )),
+      ]),
+    ]),
+    '', '#### 30／60／90 天行动',
+    ...growth.plan.map((phase) => (
+      `- 第 ${phase.day} 天 · ${escape(phase.action)} 对应 ${phase.findings.map((key) => titles.get(key) ?? key).join('、')}。`
+    )),
   ]
 }

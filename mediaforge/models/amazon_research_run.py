@@ -10,6 +10,7 @@ from mediaforge.models.amazon_research import (
     AmazonListing,
     AmazonResearchReport,
     AmazonResearchRequest,
+    AmazonReviewTopic,
     ResearchMode,
 )
 
@@ -233,6 +234,8 @@ class AmazonMarketListing(BaseModel):
     rating_count: str | None = None
     monthly_bought: int | None = None
     monthly_bought_label: str | None = None
+    review_sample_count: int | None = None
+    review_topics: list[AmazonReviewTopic] = Field(default_factory=list)
     highlights: list[str] = Field(default_factory=list)
     image_count: int | None = None
     has_aplus: bool | None = None
@@ -299,6 +302,37 @@ class AmazonStoreRevenue(BaseModel):
     section_monthly: dict[str, AmazonRevenueTotals] = Field(default_factory=dict)
 
 
+class AmazonGrowthSource(BaseModel):
+    label: str
+    url: str
+    collected_at: datetime | None = None
+    asin: str | None = None
+    section: str | None = None
+
+
+class AmazonGrowthFinding(BaseModel):
+    key: str
+    title: str
+    priority: Literal["high", "medium", "low"]
+    observed: str
+    hypothesis: str
+    action: str
+    sources: list[AmazonGrowthSource] = Field(default_factory=list)
+
+
+class AmazonGrowthAction(BaseModel):
+    day: Literal[30, 60, 90]
+    action: str
+    findings: list[str]
+
+
+class AmazonStoreGrowth(BaseModel):
+    opportunities: list[AmazonGrowthFinding]
+    risks: list[AmazonGrowthFinding]
+    plan: list[AmazonGrowthAction]
+    review_details: dict[str, AmazonMarketListing] = Field(default_factory=dict)
+
+
 class AmazonEvidence(BaseModel):
     key: str
     kind: EvidenceKind
@@ -339,6 +373,7 @@ class AmazonResearchSnapshot(BaseModel):
     lifecycle: AmazonStoreLifecycle | None = None
     competition: AmazonStoreCompetition | None = None
     revenue: AmazonStoreRevenue | None = None
+    growth: AmazonStoreGrowth | None = None
     translation_status: StepStatus = "pending"
     translation_missing: list[str] = Field(default_factory=list)
     field_translations: dict[str, str] = Field(default_factory=dict)

@@ -865,3 +865,65 @@ async def test_store_revenue_keeps_missing_evidence_and_allocates_deduplicated_s
     assert list(map(sum, zip(*section_units, strict=True))) == [1300, 1625, 1950]
     stored = (await client.get(f"{API}/{result['id']}")).json()
     assert stored["snapshot"]["revenue"] == revenue
+
+
+@respx.mock
+async def test_growth_connects_actual_sample_signals_and_preserves_failed_review_evidence(api):
+    client, _, _, _, _ = api
+    low, upper, unverified = IDS
+
+    def card(asin, title, price, stars, count, *, variants=False):
+        values = {
+            "asin": asin,
+            "detailPageLinkURL": f"/dp/{asin}",
+            "title": {"displayString": title},
+            "hasVariations": variants,
+            "priceToPay": {"displayString": price},
+            "byLine": {"contributors": [{"roles": [{"type": "BRAND"}], "name": "Fixture"}]},
+            "customerReviewsSummary": {
+                "rating": {"displayString": stars}, "count": {"value": count},
+            },
+        }
+        payload = json.dumps({"products": [values]})
+        return f'<a href="/dp/{asin}">{title}</a><script>{payload}</script>'
+
+    respx.get(INITIAL).respond(
+        200, text=card(low, "Fixture 2 Pack Cotton Tops", "$19.99", "3.6", 30)
+        + card(unverified, "Fixture Cotton Set", "$18.99", "3.4", 22, variants=True)
+        + _nav(("Cotton Collection", HOME), ("Holiday", ABOUT)),
+    )
+    respx.get(HOME).respond(
+        200, text=card(upper, "Fixture Formal Top", "$45.99", "4.4", 110),
+    )
+    respx.get(ABOUT).respond(200, text="<main>Holiday collection</main>")
+    visited = respx.get(f"{AMAZON}/dp/{low}").respond(
+        200, text="""
+        <span id="productTitle">Fixture 2 Pack Cotton Tops</span>
+        <div data-hook="review"><span data-hook="review-body">The size runs small.</span></div>
+        """,
+    )
+    respx.get(f"{AMAZON}/dp/{upper}").respond(
+        200, text='<span id="productTitle">Fixture Formal Top</span>',
+    )
+    blocked = respx.get(f"{AMAZON}/dp/{unverified}").respond(503)
+    response = await client.post(API, json={"mode": "store", "source": INITIAL})
+    run = await _run_submitted(client, response.json()["id"])
+    assert run["status"] == "partial_fail"
+    assert {item["asin"] for item in run["report"]["listings"]} == set(IDS)
+    growth = run["snapshot"]["growth"]
+    findings = {row["key"]: row for row in growth["opportunities"] + growth["risks"]}
+    assert {row["asin"] for row in findings["price-gap"]["sources"]} == {low, upper}
+    assert "USD 25–<40" in findings["price-gap"]["observed"]
+    assert findings["assortment"]["sources"][0]["asin"] == upper
+    assert "2 Pack" in findings["bundle"]["observed"]
+    assert findings["seasonality"]["sources"][0]["url"] == ABOUT
+    assert "公开品牌字段为 Fixture" in findings["ip"]["observed"]
+    quality = findings["quality"]
+    assert quality["priority"] == "high"
+    assert "尺寸与合身提及 1 条" in quality["observed"]
+    assert "HTTP 503" in quality["observed"]
+    assert {item["asin"] for item in quality["sources"]} == {low, unverified}
+    assert all(item["collected_at"] for row in findings.values() for item in row["sources"])
+    assert len(visited.calls) == len(blocked.calls) == 1
+    assert [phase["day"] for phase in growth["plan"]] == [30, 60, 90]
+    assert all(key in findings for phase in growth["plan"] for key in phase["findings"])

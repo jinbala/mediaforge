@@ -581,6 +581,8 @@ def _market_listing(html: bytes, url: str) -> AmazonMarketListing:
         price_currency=_currency(product.price),
         monthly_bought=count,
         monthly_bought_label=label,
+        review_sample_count=len(product.reviews),
+        review_topics=product.review_topics[:3],
         **product.model_dump(include={
             "asin", "title", "brand", "store_url", "category", "price", "rating",
             "rating_count", "highlights", "image_count", "has_aplus",
