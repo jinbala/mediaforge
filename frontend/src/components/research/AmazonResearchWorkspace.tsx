@@ -8,7 +8,7 @@ import { safeProductUrl } from '@/lib/amazon-product'
 import { activeAmazonRun, amazonTime, downloadAmazonFile, type AmazonRun } from '@/lib/amazon-research'
 import {
   amazonComparisonValue, amazonWorkspaceStatus, getAmazonResearchComparison, getAmazonResearchEvidence,
-  getAmazonResearchReport, getAmazonResearchReports, type AmazonResearchComparison, type AmazonResearchContext,
+  getAmazonResearchReport, getAmazonResearchReports, type AmazonReportSection, type AmazonResearchComparison, type AmazonResearchContext,
 } from '@/lib/amazon-research-common'
 
 type WorkspaceProps = {
@@ -82,7 +82,7 @@ function Download({ action, children }: { action: (signal: AbortSignal) => Promi
   </div>
 }
 
-function ReportPreview({ id, section }: { id: string; section: string }) {
+function ReportPreview({ id, section, title }: { id: string; section: string; title?: string }) {
   const load = useCallback((runId: string, signal: AbortSignal) => getAmazonResearchReport(runId, section, signal), [section])
   const { result, retry } = useWorkspaceRequest(load, id)
   if (!result) return <p role="status" className="text-sm text-muted-foreground">正在读取报告…</p>
@@ -91,7 +91,7 @@ function ReportPreview({ id, section }: { id: string; section: string }) {
   if (!markdown.trim()) return <p className="text-sm text-muted-foreground">该章节暂时没有可预览的内容。</p>
   return <div className="space-y-2">
     {section !== 'full' && <Button type="button" size="sm" variant="outline" onClick={() => downloadAmazonFile(markdown, `${id}-${section}.md`)}>
-      下载所选章节
+      {title ? `下载${title}` : '下载所选章节'}
     </Button>}
     <div className="prose prose-sm max-w-none overflow-x-auto break-words rounded-md border p-3 dark:prose-invert">
       <ReactMarkdown skipHtml remarkPlugins={[remarkGfm]} components={{
@@ -105,33 +105,55 @@ function ReportPreview({ id, section }: { id: string; section: string }) {
   </div>
 }
 
+const storeReportKeys = ['product_matrix', 'competition', 'revenue', 'growth', 'summary']
+
+function reportDetails({ status, sample_count }: AmazonReportSection) {
+  return `${amazonWorkspaceStatus(status)} · ${sample_count == null ? '样本数未知' : `${sample_count} 个样本`}`
+}
+
 function Reports({ id }: { id: string }) {
   const [section, setSection] = useState('')
+  const previewId = useId()
   const { result, retry } = useWorkspaceRequest(getAmazonResearchReports, id)
   if (!result) return <p role="status" className="text-sm text-muted-foreground">正在读取报告目录…</p>
   if (result.error !== undefined) return <RequestError text={result.error} onRetry={retry} />
 
-  const { sections, site, version } = result.data
+  const { mode, sections, site, version } = result.data
+  const isStore = mode === 'store'
+  const storeSections = isStore ? sections.filter((item) => storeReportKeys.includes(item.id)) : []
+  const storeSection = storeSections.find((item) => item.id === (section || 'summary')) ?? storeSections[0]
+  const selectedSection = isStore ? storeSection?.id : section
   return <div className="space-y-2">
     <p className="text-xs text-muted-foreground">站点 {site} · 报告版本 {version} · {sections.length} 个章节</p>
     {sections.length === 0 && <p className="text-sm text-muted-foreground">该任务暂时没有报告章节。</p>}
+    {isStore && storeSections.length > 0 && <div role="group" aria-label="预览报告" className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+      {storeSections.map((item) => <Button key={item.id} type="button"
+        variant={item.id === selectedSection ? 'default' : 'outline'}
+        aria-pressed={item.id === selectedSection} aria-controls={previewId} onClick={() => setSection(item.id)}
+        className="h-auto min-h-12 min-w-0 flex-col items-start gap-1 whitespace-normal py-2 text-left">
+        <span>{item.title}</span>
+        <span className="text-xs font-normal">{reportDetails(item)}</span>
+      </Button>)}
+    </div>}
     <div className="flex flex-wrap items-end gap-2">
-      <label className="grid min-w-0 gap-1 text-sm">
+      {!isStore && <label className="grid min-w-0 gap-1 text-sm">
         预览报告
         <select className="h-9 w-full rounded-md border border-input bg-background px-2" value={section} onChange={(event) => setSection(event.target.value)}>
           <option value="">选择报告章节</option>
           <option value="full">完整报告</option>
           {sections.filter((item) => item.id !== 'full').map((item) => <option key={item.id} value={item.id}>
-            {item.title} · {amazonWorkspaceStatus(item.status)} · {item.sample_count == null ? '样本数未知' : `${item.sample_count} 个样本`}
+            {item.title} · {reportDetails(item)}
           </option>)}
         </select>
-      </label>
+      </label>}
       <Download action={async (signal) => {
         const { markdown } = await getAmazonResearchReport(id, 'full', signal)
         if (!signal.aborted) downloadAmazonFile(markdown, `${id}-report.md`)
       }}>下载完整报告</Download>
     </div>
-    {section && <ReportPreview key={section} id={id} section={section} />}
+    {selectedSection && <div id={previewId}>
+      <ReportPreview key={selectedSection} id={id} section={selectedSection} title={storeSection?.title} />
+    </div>}
   </div>
 }
 
