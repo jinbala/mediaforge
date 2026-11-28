@@ -24,6 +24,7 @@ from mediaforge.rag.amazon_store_analysis import (
     build_benchmark_pair,
     build_product_matrix,
     build_store_lifecycle,
+    build_store_performance,
     calculate_store_revenue,
     compare_store_samples,
     market_query,
@@ -219,7 +220,8 @@ async def _report_store_lifecycle(
     products: list[AmazonStoreSample],
 ) -> None:
     snapshot = run.snapshot
-    change = compare_store_samples(snapshot, await store.prior_store_snapshots(run))
+    history = await store.prior_store_snapshots(run)
+    change = compare_store_samples(snapshot, history)
     saved = {
         item.asin: item
         for item in (snapshot.lifecycle.dates if snapshot.lifecycle else [])
@@ -242,6 +244,10 @@ async def _report_store_lifecycle(
             )
         saved.update((item.asin, item) for item in collected)
     snapshot.lifecycle.dates = [saved[asin] for asin in selected]
+    previous = dict(history).get(change.previous_run_id) if change else None
+    snapshot.lifecycle.performance = build_store_performance(
+        snapshot, products, snapshot.product_matrix, change, previous
+    )
 
 
 async def _report_competition(

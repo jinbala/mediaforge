@@ -157,6 +157,9 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
   const matrix = run?.snapshot.product_matrix
   if (matrix && run) lines.push(...formatAmazonProductMatrix(run, matrix, escape))
   if (run?.snapshot.lifecycle) lines.push(...formatAmazonLifecycle(run.snapshot.lifecycle, escape))
+  if (run?.snapshot.lifecycle?.performance) {
+    lines.push(...formatAmazonPerformance(run, run.snapshot.lifecycle.performance, escape))
+  }
   if (run?.snapshot.competition) lines.push(...formatAmazonCompetition(run.snapshot.competition, escape))
   if (run?.snapshot.revenue) lines.push(...formatAmazonRevenue(run, run.snapshot.revenue, escape))
   const archive = run?.snapshot.product_archive
@@ -278,19 +281,68 @@ export type AmazonStoreProductMatrix = {
   new_sections: Record<string, string[]>
 }
 
+type AmazonListingDate = {
+  asin: string
+  url: string
+  collected_at: string
+  label: 'first_available' | 'release_date' | null
+  date_text: string | null
+  problem: string | null
+}
+
+export type AmazonLifecycleSample = {
+  asin: string
+  section: string
+  basis: 'new_section' | 'recent_date' | 'first_available' | 'observed_again' | 'rating_total' | 'low_rating'
+  rating: number | null
+  rating_total: number | null
+  date: AmazonListingDate | null
+}
+
+export type AmazonBandPerformance = {
+  min_cents: number
+  max_cents: number | null
+  asin_count: number
+  rating_count: number
+  average_rating: number | null
+  rating_total_count: number
+  median_rating_total: number | null
+  previous_count: number | null
+  current_count: number | null
+}
+
+type AmazonHistoricalPrice = {
+  asin: string
+  section: string
+  previous_cents: number
+  previous_collected_at: string
+  current_cents: number
+  current_collected_at: string
+}
+
+export type AmazonStorePerformance = {
+  new: AmazonLifecycleSample[]
+  mature: AmazonLifecycleSample[]
+  low_rating: AmazonLifecycleSample[]
+  unknown_lifecycle: number
+  bands: AmazonBandPerformance[]
+  observation_days: number
+  mature_rating_total: number
+  low_rating_total: number
+  low_rating_threshold: number
+  comparable_asins: number | null
+  matched_prices: number | null
+  increased: number
+  decreased: number
+  price_changes: AmazonHistoricalPrice[]
+}
+
 export type AmazonStoreLifecycle = {
   colors: Record<string, number>
   sizes: Record<string, number>
   missing_color: number
   missing_size: number
-  dates: {
-    asin: string
-    url: string
-    collected_at: string
-    label: 'first_available' | 'release_date' | null
-    date_text: string | null
-    problem: string | null
-  }[]
+  dates: AmazonListingDate[]
   change: {
     previous_run_id: string
     previous_collected_at: string
@@ -300,6 +352,7 @@ export type AmazonStoreLifecycle = {
     no_longer_seen: string[]
     series_changes: { family_asin: string; newly_seen: string[]; no_longer_seen: string[] }[]
   } | null
+  performance?: AmazonStorePerformance | null
 }
 
 export type AmazonMarketListing = {
@@ -494,7 +547,7 @@ export function formatAmazonStoreSamples(run: AmazonRun) {
   }, null, 2) + '\n'
 }
 
-export function amazonPriceBandLabel(band: AmazonPriceBand) {
+export function amazonPriceBandLabel(band: Pick<AmazonPriceBand, 'min_cents' | 'max_cents'>) {
   return band.max_cents === null
     ? `USD ≥${band.min_cents / 100}`
     : `USD ${band.min_cents / 100}–<${band.max_cents / 100}`
@@ -577,6 +630,79 @@ function formatAmazonLifecycle(lifecycle: AmazonStoreLifecycle, escape: (text: s
 }
 
 export const amazonBenchmarkScope = '对标仅涵盖公开搜索及入选商品详情。完整店铺款式、市场平均评分和实际搜索量未知。'
+
+export const amazonElasticityUnknown = '价格弹性未知。店铺公开样本缺少同口径实际销量、促销及库存记录，公开评分和营收情景仅作参考。'
+
+export function amazonPerformanceGroups(performance: AmazonStorePerformance) {
+  return [
+    { label: '新品样本', rows: performance.new },
+    { label: '成熟候选', rows: performance.mature },
+    { label: '低评分样本', rows: performance.low_rating },
+  ]
+}
+
+export function amazonPerformanceRules(performance: AmazonStorePerformance) {
+  return [
+    `新品依据为公开新品栏目或距采集不足 ${performance.observation_days} 天的明确上架／发布日期。成熟候选依据为首次可售满 ${performance.observation_days} 天、同一 ASIN 在同栏目相隔至少 ${performance.observation_days} 天仍可见，或公开评分数达到 ${performance.mature_rating_total}。评分数是累积反馈信号，实际销售阶段仍待验证。`,
+    `低评分样本使用同一张卡片中低于 ${performance.low_rating_threshold.toFixed(1)} 星且至少 ${performance.low_rating_total} 个评分的记录。`,
+    '当前价带使用实际报价卡片的评分，每个价带内已确认同款按评分数领先的有效记录分别计算评分均值和评分数中位数。缺少有效评分的样本不进入对应分母。',
+  ]
+}
+
+export function amazonLifecycleBasis(row: AmazonLifecycleSample, performance: AmazonStorePerformance) {
+  const rating = `${row.rating ?? '未知'} 星 · ${row.rating_total ?? '未知'} 个公开评分`
+  if (row.date) return amazonListingDateLabel(row.date) + ' · 采集 ' + amazonTime(row.date.collected_at)
+  if (row.basis === 'new_section') return '列于公开新品栏目'
+  if (row.basis === 'observed_again') return `上期同栏目已观察到，间隔至少 ${performance.observation_days} 天`
+  return rating
+}
+
+export function amazonBandPerformanceLabel(band: AmazonBandPerformance, matched: number | null) {
+  const history = matched && band.previous_count !== null && band.current_count !== null
+    ? ` · 同批 ASIN 归入价带 ${band.previous_count} → ${band.current_count}` : ''
+  return `${band.asin_count} 个有效价 ASIN · 评分均值 ${band.average_rating ?? '未知'}（n=${band.rating_count}） · 评分数中位数 ${band.median_rating_total ?? '未知'}（n=${band.rating_total_count}）${history}`
+}
+
+export function amazonPriceHistoryLabel(performance: AmazonStorePerformance) {
+  const { matched_prices: matched, comparable_asins: comparable, increased, decreased } = performance
+  if (matched === null) return '缺少同店同栏目历史价格样本。'
+  if (!matched) return `同栏目复现 ${comparable} 个 ASIN，无可配对的两期 USD 报价。`
+  return `同一 ASIN 和同一栏目两期配对 ${matched}/${comparable} 个。上升 ${increased}，下降 ${decreased}，未变 ${matched - increased - decreased}。两期价带阈值一致。`
+}
+
+export function amazonPriceChangeLabel(row: AmazonHistoricalPrice) {
+  return `USD ${(row.previous_cents / 100).toFixed(2)}（${amazonTime(row.previous_collected_at)}）→ USD ${(row.current_cents / 100).toFixed(2)}（${amazonTime(row.current_collected_at)}）`
+}
+
+function formatAmazonPerformance(run: AmazonRun, performance: AmazonStorePerformance, escape: (value: string) => string) {
+  const sections = new Map(run.snapshot.evidence.map((item) => [item.key, item]))
+  const listings = new Map(run.report?.listings.map((item) => [item.asin, item.url]))
+  const source = (key: string) => {
+    const section = sections.get(key)
+    return section ? `[${escape(section.title_zh ?? section.title)}](${section.final_url ?? section.url}) · ${section.collected_at ? amazonTime(section.collected_at) : '采集时间未知'}` : key
+  }
+  const product = (asin: string) => {
+    const url = listings.get(asin)
+    return url ? `[${asin}](${url})` : asin
+  }
+  return [
+    '', '### 生命周期与价格表现', '', ...amazonPerformanceRules(performance),
+    `生命周期待确认 ${performance.unknown_lifecycle} 个 ASIN。`,
+    ...amazonPerformanceGroups(performance).flatMap(({ label, rows }) => [
+      `#### ${label} · ${rows.length} 个 ASIN`,
+      ...(rows.length ? rows.map((row) => (
+        `- ${product(row.asin)} · ${escape(amazonLifecycleBasis(row, performance))} · ${source(row.section)}`
+          + (row.date ? ` · [日期来源](${row.date.url})` : '')
+      )) : ['当前样本未满足判断条件。']),
+    ]),
+    '', '#### 价格带与历史', amazonPriceHistoryLabel(performance),
+    ...performance.bands.map((band) => `- ${amazonPriceBandLabel(band)} · ${amazonBandPerformanceLabel(band, performance.matched_prices)}`),
+    ...performance.price_changes.map((row) => `- ${product(row.asin)} · ${amazonPriceChangeLabel(row)} · ${source(row.section)}`),
+    ...(performance.increased + performance.decreased > performance.price_changes.length
+      ? [`价格变化按幅度列出前 ${performance.price_changes.length} 个样本。`] : []),
+    amazonElasticityUnknown,
+  ]
+}
 
 export function amazonBenchmarkBasis(pair: AmazonStoreCompetition['pairs'][number]) {
   const category = pair.shared_category ? '同末级类目 ' + pair.shared_category : '末级类目待核对'

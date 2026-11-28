@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import {
-  amazonArchiveSampleId, amazonEvidenceSampleId, amazonPortfolioPriceRule, amazonPriceBandLabel,
-  amazonListingDateLabel, amazonPriceCoverage, amazonSampleChangeLabel, amazonTime,
+  amazonArchiveSampleId, amazonBandPerformanceLabel, amazonElasticityUnknown, amazonEvidenceSampleId,
+  amazonLifecycleBasis, amazonListingDateLabel, amazonPerformanceGroups, amazonPerformanceRules,
+  amazonPortfolioPriceRule, amazonPriceBandLabel, amazonPriceChangeLabel, amazonPriceCoverage,
+  amazonPriceHistoryLabel, amazonSampleChangeLabel, amazonTime,
   amazonUnknownLaunchCadence, revealAmazonSample, type AmazonRun, type AmazonStoreProductMatrix as Matrix,
 } from '@/lib/amazon-research'
 
@@ -12,6 +14,7 @@ export function AmazonStoreProductMatrix({ run, matrix, onOpen }: {
   const sections = new Map(run.snapshot.evidence.map((item) => [item.key, item]))
   const lifecycle = run.snapshot.lifecycle
   const change = lifecycle?.change
+  const performance = lifecycle?.performance
   const names = new Map(run.report?.listings.map((item) => [item.asin, item.title_zh ?? item.title]))
   const section = (key: string) => {
     const item = sections.get(key)
@@ -137,6 +140,53 @@ export function AmazonStoreProductMatrix({ run, matrix, onOpen }: {
               <button type="button" className="text-primary hover:underline" onClick={() => onOpen(change.previous_run_id)}>打开上期快照</button>
             </div>
           ) : <p className="mt-2 border-t pt-2 text-xs">当前没有同一店铺、同一栏目可比的历史采样。</p>}
+        </details>
+      )}
+      {performance && (
+        <details className="rounded-md border p-3 text-sm">
+          <summary className="cursor-pointer font-medium">生命周期与价格表现</summary>
+          <div className="mt-2 space-y-3 text-xs">
+            <ul className="space-y-1 text-muted-foreground">
+              {amazonPerformanceRules(performance).map((rule) => <li key={rule}>{rule}</li>)}
+            </ul>
+            <p>生命周期待确认 {performance.unknown_lifecycle} 个 ASIN。</p>
+            {amazonPerformanceGroups(performance).map(({ label, rows }) => (
+              <details key={label} className="rounded border p-2">
+                <summary className="cursor-pointer font-medium">{label} · {rows.length} 个 ASIN</summary>
+                <ul className="mt-2 space-y-1">
+                  {rows.slice(0, 12).map((row) => (
+                    <li key={row.asin}>
+                      {product(row.asin)} · {row.date ? (
+                        <a href={row.date.url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                          {amazonLifecycleBasis(row, performance)}
+                        </a>
+                      ) : amazonLifecycleBasis(row, performance)} · {section(row.section)}
+                    </li>
+                  ))}
+                  {rows.length === 0 && <li>当前样本未满足判断条件。</li>}
+                  {rows.length > 12 && <li>展示前 12 个样本，其余可在报告下载中查看。</li>}
+                </ul>
+              </details>
+            ))}
+            <div className="space-y-1 border-t pt-2">
+              <h4 className="font-medium">价格带与历史</h4>
+              <p>{amazonPriceHistoryLabel(performance)}</p>
+              <ul className="space-y-1">
+                {performance.bands.map((band) => (
+                  <li key={band.min_cents}>{amazonPriceBandLabel(band)} · {amazonBandPerformanceLabel(band, performance.matched_prices)}</li>
+                ))}
+              </ul>
+              {performance.price_changes.length > 0 && <ul className="space-y-1 border-t pt-2">
+                {performance.price_changes.map((row) => (
+                  <li key={row.asin}>{product(row.asin)} · {amazonPriceChangeLabel(row)} · {section(row.section)}</li>
+                ))}
+                {performance.increased + performance.decreased > performance.price_changes.length && (
+                  <li>价格变化按幅度列出前 {performance.price_changes.length} 个样本。</li>
+                )}
+              </ul>}
+              <p className="text-muted-foreground">{amazonElasticityUnknown}</p>
+            </div>
+          </div>
         </details>
       )}
     </section>

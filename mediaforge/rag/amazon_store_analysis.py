@@ -1,6 +1,6 @@
 import re
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from itertools import combinations
 from statistics import mean, median
@@ -8,9 +8,12 @@ from uuid import UUID
 
 from mediaforge.models.amazon_research import AmazonResearchReport, AmazonStorePage
 from mediaforge.models.amazon_research_run import (
+    AmazonBandPerformance,
     AmazonBenchmarkPair,
     AmazonBenchmarkSearch,
     AmazonEvidence,
+    AmazonHistoricalPrice,
+    AmazonLifecycleSample,
     AmazonMarketListing,
     AmazonPriceBand,
     AmazonPriceObservation,
@@ -26,10 +29,12 @@ from mediaforge.models.amazon_research_run import (
     AmazonStoreChange,
     AmazonStoreIdentity,
     AmazonStoreLifecycle,
+    AmazonStorePerformance,
     AmazonStoreProductMatrix,
     AmazonStoreRevenue,
     AmazonStoreSample,
 )
+from mediaforge.rag.amazon_store_collection import parse_listing_date
 
 
 def section_samples(snapshot: AmazonResearchSnapshot) -> list[AmazonEvidence]:
@@ -247,6 +252,10 @@ def _rating_total(product: AmazonStoreSample) -> int | None:
     return None
 
 
+def _in_price_band(cents: int, low: int, high: int | None) -> bool:
+    return cents >= low and (high is None or cents < high)
+
+
 def _product_section_metrics(section: AmazonEvidence) -> AmazonSectionMetrics:
     scores = [score for row in section.products if (score := _rating_value(row)) is not None]
     totals = [count for row in section.products if (count := _rating_total(row)) is not None]
@@ -282,7 +291,7 @@ def build_product_matrix(
         members = sorted(
             asin
             for asin, quote in prices.items()
-            if quote.price_cents >= low and (high is None or quote.price_cents < high)
+            if _in_price_band(quote.price_cents, low, high)
         )
         bands.append(
             AmazonPriceBand(
@@ -416,6 +425,168 @@ def build_store_lifecycle(
         missing_color=len(products) - sum(colors.values()),
         missing_size=len(products) - sum(sizes.values()),
         change=change,
+    )
+
+
+_MATURE_RATING_TOTAL = 100
+_MATURE_SEEN_DAYS = 90
+_LOW_RATING_TOTAL = 10
+_LOW_RATING = Decimal("4.0")
+_PRICE_CHANGE_DISPLAY = 12
+
+
+def _historical_prices(
+    current: AmazonResearchSnapshot, previous: AmazonResearchSnapshot, keys: list[str]
+) -> tuple[set[str], dict[str, str], dict[str, AmazonHistoricalPrice]]:
+    before, after = _complete_sections(previous), _complete_sections(current)
+    comparable, persisted, prices = set(), {}, {}
+    for key in keys:
+        prior, latest = before[key], after[key]
+        matured = latest.collected_at - prior.collected_at >= timedelta(days=_MATURE_SEEN_DAYS)
+        prior_products = {item.asin: item for item in prior.products}
+        for sample in latest.products:
+            if sample.asin not in prior_products:
+                continue
+            comparable.add(sample.asin)
+            if matured:
+                persisted.setdefault(sample.asin, key)
+            if sample.asin in prices:
+                continue
+            old = public_usd_cents(prior_products[sample.asin])
+            new = public_usd_cents(sample)
+            # 历史配对固定同一 ASIN、同一栏目和 USD 单价，缺一端时不拿其他栏目的价格补齐。
+            if old is not None and new is not None:
+                prices[sample.asin] = AmazonHistoricalPrice(
+                    asin=sample.asin,
+                    section=key,
+                    previous_cents=old,
+                    previous_collected_at=prior.collected_at,
+                    current_cents=new,
+                    current_collected_at=latest.collected_at,
+                )
+    return comparable, persisted, prices
+
+
+def _band_performance(
+    band: AmazonPriceBand,
+    matrix: AmazonStoreProductMatrix,
+    products: dict[str, AmazonStoreSample],
+    cards: dict[tuple[str, str], AmazonStoreSample],
+    prices: dict[str, AmazonHistoricalPrice] | None,
+) -> AmazonBandPerformance:
+    observed = sorted(
+        (cards[(matrix.prices[asin].section, asin)] for asin in band.asins),
+        key=lambda item: (-(_rating_total(item) or 0), item.asin),
+    )
+    ratings, totals = {}, {}
+    for sample in observed:
+        # 同价带中已确认同款只贡献一次各评分指标，使用实际提供该报价的卡片。
+        family = products[sample.asin].family_asin or sample.asin
+        if (rating := _rating_value(sample)) is not None:
+            ratings.setdefault(family, rating)
+        if (total := _rating_total(sample)) is not None:
+            totals.setdefault(family, total)
+    return AmazonBandPerformance(
+        min_cents=band.min_cents,
+        max_cents=band.max_cents,
+        asin_count=len(band.asins),
+        rating_count=len(ratings),
+        average_rating=round(float(mean(ratings.values())), 2) if ratings else None,
+        rating_total_count=len(totals),
+        median_rating_total=median(totals.values()) if totals else None,
+        previous_count=sum(
+            _in_price_band(row.previous_cents, band.min_cents, band.max_cents)
+            for row in prices.values()
+        ) if prices is not None else None,
+        current_count=sum(
+            _in_price_band(row.current_cents, band.min_cents, band.max_cents)
+            for row in prices.values()
+        ) if prices is not None else None,
+    )
+
+
+def build_store_performance(
+    snapshot: AmazonResearchSnapshot,
+    samples: list[AmazonStoreSample],
+    matrix: AmazonStoreProductMatrix,
+    change: AmazonStoreChange | None,
+    previous: AmazonResearchSnapshot | None,
+) -> AmazonStorePerformance:
+    products = {item.asin: item for item in samples}
+    cards = {
+        (section.key, item.asin): item
+        for section in section_samples(snapshot)
+        if section.code != "duplicate"
+        for item in section.products
+    }
+    repeat, listed_before, history_prices = (
+        _historical_prices(snapshot, previous, change.section_keys)
+        if change and previous else (set(), {}, None)
+    )
+    new_sections = {
+        asin: key for key, asins in matrix.new_sections.items() for asin in asins
+    }
+    new = {
+        asin: AmazonLifecycleSample(asin=asin, section=key, basis="new_section")
+        for asin, key in sorted(new_sections.items())
+    }
+    mature, low = {}, {}
+    sources = section_index(snapshot)
+    for observed in snapshot.lifecycle.dates if snapshot.lifecycle else []:
+        parsed = parse_listing_date(observed.date_text or "")
+        if parsed is None or observed.asin in new or observed.asin not in sources:
+            continue
+        age = (observed.collected_at.date() - parsed).days
+        key = sources[observed.asin][0]
+        if 0 <= age < _MATURE_SEEN_DAYS:
+            new[observed.asin] = AmazonLifecycleSample(
+                asin=observed.asin, section=key, basis="recent_date", date=observed
+            )
+        elif age >= _MATURE_SEEN_DAYS and observed.label == "first_available":
+            mature[observed.asin] = AmazonLifecycleSample(
+                asin=observed.asin, section=key, basis="first_available", date=observed
+            )
+    for asin, key in sorted(listed_before.items()):
+        if asin not in new:
+            mature.setdefault(asin, AmazonLifecycleSample(
+                asin=asin, section=key, basis="observed_again"
+            ))
+    for (key, asin), item in cards.items():
+        rating, total = _rating_value(item), _rating_total(item)
+        if asin not in new and asin not in mature and total is not None and (
+            total >= _MATURE_RATING_TOTAL
+        ):
+            mature[asin] = AmazonLifecycleSample(
+                asin=asin, section=key, rating=rating, rating_total=total,
+                basis="rating_total",
+            )
+        if rating is not None and rating < _LOW_RATING and (
+            total is not None and total >= _LOW_RATING_TOTAL
+        ) and asin not in low:
+            low[asin] = AmazonLifecycleSample(
+                asin=asin, section=key, basis="low_rating", rating=rating, rating_total=total,
+            )
+    price_changes = sorted(
+        (row for row in (history_prices or {}).values()
+         if row.current_cents != row.previous_cents),
+        key=lambda row: (-abs(row.current_cents - row.previous_cents), row.asin),
+    )
+    return AmazonStorePerformance(
+        new=list(new.values()),
+        mature=list(mature.values()),
+        low_rating=list(low.values()),
+        unknown_lifecycle=len(products) - len(new) - len(mature),
+        bands=[_band_performance(band, matrix, products, cards, history_prices)
+               for band in matrix.price_bands],
+        observation_days=_MATURE_SEEN_DAYS,
+        mature_rating_total=_MATURE_RATING_TOTAL,
+        low_rating_total=_LOW_RATING_TOTAL,
+        low_rating_threshold=float(_LOW_RATING),
+        comparable_asins=len(repeat) if history_prices is not None else None,
+        matched_prices=len(history_prices) if history_prices is not None else None,
+        increased=sum(row.current_cents > row.previous_cents for row in price_changes),
+        decreased=sum(row.current_cents < row.previous_cents for row in price_changes),
+        price_changes=price_changes[:_PRICE_CHANGE_DISPLAY],
     )
 
 

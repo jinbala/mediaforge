@@ -20,7 +20,11 @@ from mediaforge.gateway.middleware.observability import _should_log_body
 from mediaforge.gateway.middleware.rate_limit import limiter
 from mediaforge.gateway.routers import amazon_research as router
 from mediaforge.models.amazon_research import AmazonStoreVariant
-from mediaforge.models.amazon_research_run import AmazonResearchSnapshot, AmazonStoreSample
+from mediaforge.models.amazon_research_run import (
+    AmazonListingDate,
+    AmazonResearchSnapshot,
+    AmazonStoreSample,
+)
 from mediaforge.models.tenant import Tenant, TenantPlan
 from mediaforge.models.user import User
 from mediaforge.orchestrator import amazon_research as pipeline
@@ -29,7 +33,10 @@ from mediaforge.rag.amazon_research import AMAZON, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import (
     archive,
     build_product_matrix,
+    build_store_lifecycle,
+    build_store_performance,
     calculate_store_revenue,
+    compare_store_samples,
     section_index,
     summarize_archive,
 )
@@ -574,6 +581,81 @@ def test_empty_product_matrix_preserves_unknown_price_share():
     assert all(band.share_pct is None for band in matrix.price_bands)
 
 
+def test_store_performance_uses_fixed_price_cohort_and_visible_lifecycle_signals():
+    now = datetime(2026, 11, 28, tzinfo=UTC)
+    then = now - timedelta(days=91)
+    first, variant, moved = IDS
+    weak, dated, new = ("B000000004", "B000000005", "B000000006")
+
+    def sample(asin, price=None, rating=None, count=None, *, family=None):
+        return AmazonStoreSample(
+            asin=asin, title=asin, url=f"{AMAZON}/dp/{asin}", family_asin=family,
+            family_members=[first, variant] if family else [],
+            price=price, price_currency="USD" if price else None,
+            rating=rating, rating_count=count,
+        )
+
+    def section(url, at, items, role=None):
+        item = section_step(url, "Fixture", role)
+        item.status, item.collected_at, item.products = "success" if items else "empty", at, items
+        return item
+
+    previous = AmazonResearchSnapshot(evidence=[
+        section(INITIAL, then, [sample(first, "$24.99"), sample(variant, "$39.99"),
+                                sample(moved, "$59.99")]),
+        section(HOME, then, []),
+    ])
+    now_sample = section(INITIAL, now, [
+        sample(first, "$39.99", "4.0", "23", family=first),
+        sample(variant, "$39.99", "4.8", "150", family=first),
+        sample(weak, "$59.00", "3.7", "9"),
+        sample(dated, None, "4.2", "105"),
+    ])
+    current = AmazonResearchSnapshot(evidence=[
+        now_sample,
+        section(HOME, now, [sample(moved, "$49.99", "3.9", "10")]),
+        section(NEW, now, [sample(new, "$40.00", "4.1", "123")], "new"),
+    ])
+    products = archive(current)
+    matrix = build_product_matrix(current, products)
+    change = compare_store_samples(current, [(uuid4(), previous)])
+    assert change is not None
+    current.lifecycle = build_store_lifecycle(products, change)
+    current.lifecycle.dates = [
+        AmazonListingDate(
+            asin=dated, url=f"{AMAZON}/dp/{dated}", collected_at=now,
+            label="release_date", date_text="November 27, 2026",
+        )
+    ]
+    perf = build_store_performance(current, products, matrix, change, previous)
+    assert {row.asin: row.basis for row in perf.new} == {
+        new: "new_section", dated: "recent_date",
+    }
+    assert {row.asin: row.basis for row in perf.mature} == {
+        first: "observed_again", variant: "observed_again",
+    }
+    assert [row.asin for row in perf.low_rating] == [moved]
+    assert perf.unknown_lifecycle == 2
+    assert perf.comparable_asins == perf.matched_prices == 2
+    assert perf.increased == 1 and perf.decreased == 0
+    move = perf.price_changes[0]
+    assert (move.asin, move.section, move.previous_cents, move.current_cents) == (
+        first, now_sample.key, 2499, 3999,
+    )
+    assert move.previous_collected_at == then and move.current_collected_at == now
+    assert [(row.previous_count, row.current_count) for row in perf.bands] == [
+        (0, 0), (1, 0), (1, 2), (0, 0), (0, 0),
+    ]
+    band = next(row for row in perf.bands if row.min_cents == 2500)
+    assert (band.asin_count, band.rating_count, band.average_rating) == (2, 1, 4.8)
+    assert (band.rating_total_count, band.median_rating_total) == (1, 150)
+    standalone = build_store_performance(current, products, matrix, None, None)
+    assert standalone.matched_prices is None
+    assert all(row.previous_count is None and row.current_count is None for row in standalone.bands)
+    assert [row.asin for row in standalone.mature] == [variant]
+    assert standalone.mature[0].basis == "rating_total"
+
+
 @respx.mock
 async def test_store_lifecycle_compares_same_owner_snapshots_and_keeps_observation_dates(api):
     client, _, identity, _, _ = api
@@ -611,6 +693,8 @@ async def test_store_lifecycle_compares_same_owner_snapshots_and_keeps_observati
     ]
     assert lifecycle["dates"][0]["label"] == "release_date"
     assert lifecycle["dates"][0]["url"].endswith(IDS[2])
+    assert lifecycle["performance"]["matched_prices"] == 0
+    assert lifecycle["performance"]["comparable_asins"] == 1
 
     identity["owner"] = uuid4(), uuid4()
     other = await client.post(API, json={"mode": "store", "source": INITIAL})

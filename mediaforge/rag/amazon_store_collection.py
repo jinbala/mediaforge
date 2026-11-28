@@ -1,6 +1,6 @@
 import asyncio
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from time import monotonic
 from typing import Literal
@@ -432,6 +432,15 @@ def discover_sections(
     return added, root, limited
 
 
+def parse_listing_date(text: str) -> date | None:
+    for pattern in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _visible_listing_date(
     html: bytes,
 ) -> tuple[Literal["first_available", "release_date"] | None, str | None]:
@@ -460,14 +469,9 @@ def _visible_listing_date(
         if not value:
             continue
         cleaned = value.translate({0x200E: None, 0x200F: None}).strip(" :")
-        for pattern in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
-            try:
-                datetime.strptime(cleaned, pattern)
-            except ValueError:
-                continue
+        if parse_listing_date(cleaned) is not None:
             # 保留 Amazon 的原始日期措辞。发布日期和在 Amazon 首次可售日期含义不同。
             found.setdefault(label, cleaned[:100])
-            break
     for label in labels.values():
         if label in found:
             return label, found[label]

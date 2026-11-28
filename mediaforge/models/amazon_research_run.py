@@ -159,6 +159,56 @@ class AmazonStoreChange(BaseModel):
     series_changes: list[AmazonSeriesChange]
 
 
+class AmazonLifecycleSample(BaseModel):
+    asin: str
+    section: str
+    basis: Literal[
+        "new_section", "recent_date", "first_available", "observed_again",
+        "rating_total", "low_rating",
+    ]
+    rating: float | None = None
+    rating_total: int | None = None
+    date: AmazonListingDate | None = None
+
+
+class AmazonBandPerformance(BaseModel):
+    min_cents: int
+    max_cents: int | None
+    asin_count: int
+    rating_count: int
+    average_rating: float | None
+    rating_total_count: int
+    median_rating_total: float | None
+    previous_count: int | None = None
+    current_count: int | None = None
+
+
+class AmazonHistoricalPrice(BaseModel):
+    asin: str
+    section: str
+    previous_cents: int
+    previous_collected_at: datetime
+    current_cents: int
+    current_collected_at: datetime
+
+
+class AmazonStorePerformance(BaseModel):
+    new: list[AmazonLifecycleSample]
+    mature: list[AmazonLifecycleSample]
+    low_rating: list[AmazonLifecycleSample]
+    unknown_lifecycle: int
+    bands: list[AmazonBandPerformance]
+    observation_days: int
+    mature_rating_total: int
+    low_rating_total: int
+    low_rating_threshold: float
+    comparable_asins: int | None = None
+    matched_prices: int | None = None
+    increased: int = 0
+    decreased: int = 0
+    price_changes: list[AmazonHistoricalPrice] = Field(default_factory=list)
+
+
 class AmazonStoreLifecycle(BaseModel):
     colors: dict[str, int]
     sizes: dict[str, int]
@@ -166,6 +216,7 @@ class AmazonStoreLifecycle(BaseModel):
     missing_size: int
     dates: list[AmazonListingDate] = Field(default_factory=list)
     change: AmazonStoreChange | None = None
+    performance: AmazonStorePerformance | None = None
 
 
 class AmazonMarketListing(BaseModel):
