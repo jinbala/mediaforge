@@ -10,6 +10,7 @@ from mediaforge.db.engine import get_session
 from mediaforge.db.tables import AmazonResearchRunTable as Run
 from mediaforge.models.amazon_research import AmazonResearchReport
 from mediaforge.models.amazon_research_run import (
+    TRANSLATION_KEYS,
     AmazonResearchRun,
     AmazonResearchRunRequest,
     AmazonResearchRunSummary,
@@ -38,7 +39,11 @@ def source_key(mode: str, url: str) -> str:
 
 
 def _fingerprint(inputs: AmazonResearchRunRequest) -> str:
-    payload = inputs.model_dump(mode="json", exclude={"source", "submission_id"})
+    payload = inputs.model_dump(mode="json", exclude={"source", "submission_id", "site"})
+    if inputs.context is None:
+        payload.pop("context", None)
+    if not inputs.supplemental_notes:
+        payload.pop("supplemental_notes", None)
     # 旧店铺活跃任务的指纹不包含后来新增的类目参数。
     if inputs.mode == "store":
         payload.pop("category", None)
@@ -156,6 +161,21 @@ async def get_run(owner: tuple[UUID, UUID], run_id: UUID) -> AmazonResearchRun |
         return _view(row) if row else None
 
 
+async def previous_run(
+    owner: tuple[UUID, UUID], current: AmazonResearchRun,
+) -> AmazonResearchRun | None:
+    async with get_session() as session:
+        row = await session.scalar(
+            select(Run).where(
+                _owner(owner), Run.mode == current.mode,
+                Run.canonical_source == current.canonical_source,
+                Run.created_at < current.created_at, Run.report.is_not(None),
+                Run.status.in_(("done", "partial_fail")),
+            ).order_by(Run.created_at.desc(), Run.id.desc()).limit(1)
+        )
+        return _view(row) if row else None
+
+
 async def retry_run(
     owner: tuple[UUID, UUID],
     run_id: UUID,
@@ -185,6 +205,17 @@ async def retry_run(
             ]
             if target == "resume" and run.status not in {"queue_failed", "interrupted"}:
                 raise ResearchRunConflict("当前任务没有中断或派发失败。")
+            if target == "translation":
+                if (item_key is not None or not run.report
+                        or run.status not in {"done", "partial_fail"}):
+                    raise ResearchRunConflict("当前任务没有可补译的已保存报告。")
+                if run.snapshot.translation_status == "success":
+                    raise ResearchRunConflict("当前报告没有待补译字段。")
+                key = TRANSLATION_KEYS[run.mode]
+                step = next((item for item in run.snapshot.evidence if item.key == key), None)
+                if step:
+                    step.status = "pending"
+                run.snapshot.translation_status = "pending"
             if target == "failed":
                 if not retryable:
                     raise ResearchRunConflict("当前没有可重试的采集或分析项。")

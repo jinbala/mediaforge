@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from time import monotonic
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -16,7 +17,12 @@ from mediaforge.rag.amazon_research import (
     amazon_public_client,
     suggestion_request,
 )
-from mediaforge.rag.amazon_store_translation import localize_research_fields
+from mediaforge.rag.amazon_store_translation import (
+    DetailField,
+    TranslationInputs,
+    TranslationStage,
+    localize_research_fields,
+)
 
 
 def _publish(run: AmazonResearchRun) -> None:
@@ -38,6 +44,8 @@ def _publish(run: AmazonResearchRun) -> None:
     ]
     if snapshot.category_scope.discovery_truncated:
         snapshot.notes.append("发现的子榜超过采集上限，优先保留用户指定的榜单。")
+    if snapshot.translation_status in {"incomplete", "failed"}:
+        snapshot.notes.append("部分榜单字段未取得中文译文，仍可查看原文和来源。")
     run.report = AmazonResearchReport(
         mode="bestsellers",
         title=main.title,
@@ -51,24 +59,45 @@ def _publish(run: AmazonResearchRun) -> None:
     )
 
 
+def _translation_inputs(run: AmazonResearchRun) -> TranslationInputs:
+    boards = [
+        item for item in run.snapshot.evidence
+        if item.kind == "board" and item.title != "提交的主榜单"
+    ]
+    products = [row for board in boards for row in board.products]
+    variants = [row.store_variant for row in products if row.store_variant]
+    return TranslationInputs(
+        [*boards, *products, *variants],
+        variants,
+        [DetailField("category", row.product_type) for row in products if row.product_type],
+    )
+
+
 async def collect_category(run: AmazonResearchRun, token: UUID) -> None:
     snapshot = run.snapshot
     scope = snapshot.category_scope or CategoryScope()
     snapshot.category_scope = scope
-    if not snapshot.evidence:
-        snapshot.evidence.append(board_step(run.source, "提交的主榜单", "main"))
+    main = next((item for item in snapshot.evidence if item.kind == "board"), None)
+    if main is None:
+        main = board_step(run.source, "提交的主榜单", "main")
+        snapshot.evidence.insert(0, main)
         await store.checkpoint(run, token, "boards")
-    main = snapshot.evidence[0]
+    translation = TranslationStage(
+        run, "category-translation", "补充榜单中文字段",
+        lambda: _translation_inputs(run), lambda stage: store.checkpoint(run, token, stage),
+    )
+    main_index = snapshot.evidence.index(main)
     async with amazon_public_client() as client:
         if main.status == "pending":
             main = await collect_board(client, main, scope.main_limit)
-            snapshot.evidence[0] = main
+            snapshot.evidence[main_index] = main
+            translation.refresh()
             _publish(run)
             await store.checkpoint(run, token, "boards")
         manual = run.inputs.category.subcategories if run.inputs.category else []
         discovered, limited = discover_boards(main, manual, scope.child_limit)
         # 恢复任务以已经保存的榜单为准，新发现的链接只补入尚余的槽位。
-        children = [item for item in snapshot.evidence[1:] if item.kind == "board"]
+        children = [item for item in snapshot.evidence if item.kind == "board" and item is not main]
         known = {item.key for item in children}
         for board in discovered:
             if board.key in known:
@@ -79,6 +108,7 @@ async def collect_category(run: AmazonResearchRun, token: UUID) -> None:
             snapshot.evidence.append(board)
             children.append(board)
         scope.discovery_truncated = limited
+        translation.refresh()
         await store.checkpoint(run, token, "boards")
         gate = asyncio.Semaphore(3)
 
@@ -94,6 +124,7 @@ async def collect_category(run: AmazonResearchRun, token: UUID) -> None:
                 item = await task
                 index = next(i for i, row in enumerate(snapshot.evidence) if row.key == item.key)
                 snapshot.evidence[index] = item
+                translation.refresh()
                 logger.info(
                     "Amazon category run={} item={} status={} reason={} count={}",
                     run.id,
@@ -138,22 +169,9 @@ async def collect_category(run: AmazonResearchRun, token: UUID) -> None:
                 search.attempts += 1
                 snapshot.suggestions = data or []
     _publish(run)
-    await store.checkpoint(run, token, "category-analysis")
     boards = [item for item in snapshot.evidence if item.kind == "board"]
-    if any(board.products for board in boards):
-        try:
-            snapshot.translation_missing = await localize_research_fields(
-                boards + [row for board in boards for row in board.products], []
-            )
-            snapshot.translation_status = (
-                "incomplete" if snapshot.translation_missing else "success"
-            )
-        except Exception as exc:
-            snapshot.translation_status = "failed"
-            logger.warning(
-                "Amazon category run={} phase=translation error={}", run.id, type(exc).__name__
-            )
-    analysis = next((item for item in snapshot.evidence if item.kind == "analysis"), None)
+    await translation.execute(localize_research_fields, lambda: _publish(run))
+    analysis = next((item for item in snapshot.evidence if item.key == "category-analysis"), None)
     if analysis is None:
         analysis = AmazonEvidence(
             key="category-analysis",
@@ -163,6 +181,8 @@ async def collect_category(run: AmazonResearchRun, token: UUID) -> None:
             method="基于同一任务快照的版本化分析",
         )
         snapshot.evidence.append(analysis)
+    await store.checkpoint(run, token, "category-analysis")
+    started = monotonic()
     analysis.collected_at = datetime.now(UTC)
     analysis.attempts += 1
     try:
@@ -173,6 +193,7 @@ async def collect_category(run: AmazonResearchRun, token: UUID) -> None:
         analysis.status, analysis.code = "failed", "analysis_error"
         analysis.reason = "分析未完成；榜单证据仍可查看和下载，可重试分析。"
         logger.error("Amazon category run={} phase=analysis error={}", run.id, type(exc).__name__)
+    analysis.duration_ms = round((monotonic() - started) * 1000)
     _publish(run)
     useful = any(item.products or item.status == "empty" for item in boards)
     partial = limited or any(i.status in {"failed", "incomplete"} for i in snapshot.evidence)

@@ -12,6 +12,7 @@
 | 亚马逊调研 | 从工作台或侧栏打开「亚马逊调研」。单品、类目和店铺共用可恢复任务与历史。单品采集商品详情、最多 5 个搜索词、最多 4 个候选详情和四种评论样本；查看九个 REQ 专题、证据和下载，编辑成本/Listing/图片需求并串联图片创作。数据不足单项标明，不补造估算。品牌店铺提交一个美国站链接即可识别首页并逐页采集，查看来源、状态、产品组合、价格带、归档、新品样本变化与公开竞品，核对销量与营收情景，展开同配色尺码。可下载带采样范围的逐栏目快照，从「历史记录」恢复或重试失败项。 | [调研页面](<../frontend/src/app/(app)/research/page.tsx>) · [任务模型](../mediaforge/models/amazon_product.py) · [任务 API](../mediaforge/gateway/routers/amazon_research.py) · [单品编排](../mediaforge/orchestrator/amazon_product.py) · [商品采集](../mediaforge/rag/amazon_product_collection.py) · [专题规则](../mediaforge/workers/amazon_product_analysis.py) · [财务规则](../mediaforge/workers/amazon_product_finance.py) · [采集样本](../tests/test_amazon_product_collection.py) · [任务状态样本](../tests/test_amazon_product_runs.py) · [店铺编排](../mediaforge/orchestrator/amazon_research.py) · [栏目采集](../mediaforge/rag/amazon_store_collection.py) · [采集与恢复测试](../tests/test_amazon_store_depth.py)。按[调研流程](#亚马逊调研)复核 REQ-021–029 与 REQ-001。 |
 | 亚马逊调研工具（REQ-039–044） | 在「亚马逊调研 → 调研工具」运行关键词、Listing、PPC、FBA、到岸成本或 HS 查询。查看来源和缺项，下载 JSON 或从当前浏览器的「工具历史」恢复。 | [工具面板](../frontend/src/components/research/AmazonScriptTools.tsx) · [接口模型](../mediaforge/models/amazon_script_tools.py) · [验收步骤](#调研工具req-039044) · [固定样本测试](../tests/test_amazon_script_tools.py) |
 | 类目深调研（REQ-012–020） | 「亚马逊调研 → 类目榜单」，自动发现子榜，可指定子榜与成本；在历史恢复报告并下载逐榜证据。 | [类目编排](../mediaforge/orchestrator/amazon_category.py) · [类目采集](../mediaforge/rag/amazon_category_collection.py) · [分析规则](../mediaforge/rag/amazon_category_analysis.py) · [固定样本](../tests/test_amazon_category_depth.py) |
+| 亚马逊调研共用功能（REQ-030–038） | 三种模式完成或部分完成后，在「Amazon 调研工作台」预览、下载专题和证据，重试中文补充，打开来源任务或比较上期。 | [工作台](../frontend/src/components/research/AmazonResearchWorkspace.tsx) · [共用 API](../mediaforge/gateway/routers/amazon_research.py) · [验收场景](#共用调研能力req-030038) |
 | 亚马逊运营技能（REQ-045–095） | 「亚马逊调研 → 运营技能」，分组选择编号，填写事实、假设或授权报表汇总，生成和下载报告。 | [技能面板](../frontend/src/components/research/AmazonSkills.tsx) · [目录与分发](../mediaforge/workers/amazon_skills.py) · [基础技能](#亚马逊运营技能req-045060) · [进阶技能](#进阶运营技能req-061095) |
 | 图片创作与拼多多默认值 | 打开空白图片创作表单，默认选中拼多多，仍可按商品切换目标平台。复用任务带入原有参数。亚马逊调研入口预选 Amazon、主图和详情图，并带入可编辑的风格要求。通过 `POST /api/v1/batch/submit` 提交异步任务。 | [创作表单](<../frontend/src/app/(app)/batch/page.tsx>) · [批量提交 API](../mediaforge/gateway/routers/batch.py)。复核空白表单、复用任务和调研带入路径。 |
 | 工作台与任务详情 | 在工作台查看需要处理的任务，可隐藏单条提醒。通过「全部任务」进入详情，核对 SKU、进度、素材及失败原因。 | [工作台](<../frontend/src/app/(app)/dashboard/page.tsx>) · [任务详情](<../frontend/src/app/(app)/tasks/page.tsx>) · [任务 API](../mediaforge/gateway/routers/tasks.py) · [任务测试](../tests/test_tasks_list.py)。隐藏一条提醒并刷新，核对提醒数量及任务列表。 |
@@ -20,6 +21,19 @@
 | 智能助手 | 对话检索参考图，按确认卡片核对生成配置，确认后提交任务并跟踪进度。 | [助手 API](../mediaforge/gateway/routers/agent.py) · [助手工具](../mediaforge/orchestrator/agent_tools.py) · [任务确认测试](../tests/test_agent_production_controls.py) |
 
 ## 亚马逊调研
+
+### 共用调研能力（REQ-030–038）
+
+- **中文和来源（030、031、038）**：`TranslationStage` 复用配置的文本模型和词表。中文与原文分开保存，可在工作台展开核对；缺译保留原文，不影响已有报告。报告与证据区分公开观测、估算、用户输入和未知，标明站点 US、采集范围、时间、币种、来源及分析口径。接口拒绝非美国站；页面实际币种可不同于美国站报告币种，不自动换汇。
+- **报告与历史（032、034）**：`GET /api/v1/research/amazon/runs/{id}/reports` 返回目录，`/reports/{section}` 或 `/reports/full` 返回 Markdown，`/evidence` 返回结构化证据 JSON，`/comparison` 返回同一企业、账号、模式和规范来源的最近一期可用快照。只有双方覆盖的已采范围参与比较；没有同期或可比指标显示未知。类目和产品分别保留 5／9 个专题，店铺五专题中的营收、增长等未取得证据的项目显示未知，不从评分量推算。
+- **进度、补译及降级（033、037）**：原任务的恢复与指定失败项重试继续可用。`POST .../retry?target=translation` 仅将已有报告的中文补充阶段置为待处理；已有原文、译文和成功采集不清空。公开页面受限、样本空或缺失时查看逐项状态；可填「补充公开或授权资料」保存有权提供的文字，不向该文字内的链接发起访问，也不合入公开样本统计。
+- **结果串联（035）**：在类目机会表展开对应 ASIN，可调研单品或核对公开品牌店铺；店铺链接只在点击时尝试从该商品的美国站公开页读取。目标任务保存来源任务、所选 ASIN 和调研方向，按同一企业和个人权限打开。继续使用单品专题已有的图片需求带入路径。
+
+**验收（036）**：用 Oakgarden、LEGO、服装榜单、`B0033SHO4Q` 与服装 ASIN `B0HNJFCDNL` 各跑一次；同一输入再跑一期后比对历史，抽查专题 Markdown、原始 JSON、类目跳转、重试及图片表单。将任务 ID、实采数量和失败原因记录在验收证据中。不用登录绕过 Amazon 限制；模拟的 ASGI/数据库测试与登录后的真实结果分开计。部署先更新 Gateway 和 `low` worker 后再更新页面；扩展 JSON 快照，无新增迁移。
+
+本地验证：隔离 Python 3.12 容器执行 `pytest -q tests/test_amazon_research*.py tests/test_amazon_product*.py tests/test_amazon_store_depth.py tests/test_amazon_category_depth.py`，146 项通过，包括权限隔离、同源比较、翻译单项重试、来源串联和未核验资料。前端 `npm run build` 与受影响文件 ESLint 通过。当前浏览器访问 `/research` 被引导到登录页，未进行登录后的五样本业务实采，未生成该阶段的任务 ID。
+
+### 入口与操作
 
 调研表单关闭浏览器自动填充历史。验收时聚焦链接或联想词输入框，检查浏览器历史下拉框不遮挡页面，并粘贴链接按回车提交。
 

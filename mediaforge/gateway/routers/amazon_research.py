@@ -2,7 +2,7 @@ from datetime import datetime
 from time import monotonic
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from kombu.exceptions import OperationalError
 from loguru import logger
 from redis.exceptions import RedisError
@@ -13,6 +13,8 @@ from mediaforge.gateway.dependencies import get_current_principal, get_tenant_on
 from mediaforge.gateway.middleware.rate_limit import limiter
 from mediaforge.models.amazon_category import CategoryInputs
 from mediaforge.models.amazon_research import AmazonResearchReport, AmazonResearchRequest
+from mediaforge.models.amazon_research_comparison import ResearchRunComparison
+from mediaforge.models.amazon_research_export import ResearchEvidenceBundle, ResearchReportIndex
 from mediaforge.models.amazon_research_run import (
     AmazonResearchRun,
     AmazonResearchRunRequest,
@@ -37,12 +39,20 @@ from mediaforge.rag.amazon_category_collection import board_identity, normalize_
 from mediaforge.rag.amazon_research import (
     AmazonFetchError,
     AmazonSourceError,
+    amazon_public_client,
     normalize_source,
     run_amazon_research,
 )
 from mediaforge.rag.amazon_script_samples import lookup_hs, sample_keywords, sample_products
+from mediaforge.rag.amazon_store_collection import collect_market_listing
 from mediaforge.workers.amazon_fba_fees import calculate_fba
 from mediaforge.workers.amazon_landed_cost import calculate_landed
+from mediaforge.workers.amazon_research_comparison import compare_research_runs
+from mediaforge.workers.amazon_research_export import (
+    build_evidence_bundle,
+    build_report_index,
+    build_report_markdown,
+)
 from mediaforge.workers.amazon_skill_definitions import SKILLS
 from mediaforge.workers.amazon_skills import generate_skill_report
 
@@ -128,6 +138,13 @@ async def _owned_run(owner: tuple[UUID, UUID], run_id: UUID) -> AmazonResearchRu
     return run
 
 
+def _has_sample(run: AmazonResearchRun, asin: str | None) -> bool:
+    return bool(asin and (
+        asin in run.snapshot.asin_sources
+        or (run.report and any(item.asin == asin for item in run.report.listings))
+    ))
+
+
 async def _enqueue(run: AmazonResearchRun, owner: tuple[UUID, UUID]) -> AmazonResearchRun:
     # 先提交数据库，再通知 worker，派发失败也保留可恢复的任务标识。
     try:
@@ -172,8 +189,16 @@ async def submit_amazon_run(
                 raise AmazonSourceError("子类目和成本假设仅用于类目榜单任务。")
         body.keyword = body.keyword.strip()
         body.review_samples = body.review_samples.strip() if body.mode == "product" else ""
+        body.supplemental_notes = body.supplemental_notes.strip()
     except AmazonSourceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if body.context is not None:
+        parent = await _owned_run(owner, body.context.run_id)
+        if parent.mode == body.mode or (body.mode == "product" and (
+            body.context.asin != body.source.rsplit("/", 1)[-1]
+            or not _has_sample(parent, body.context.asin)
+        )) or (parent.mode == "bestsellers" and not _has_sample(parent, body.context.asin)):
+            raise HTTPException(status_code=422, detail="来源任务未包含该调研方向的商品样本。")
     try:
         run, created = await store.submit_run(owner, body)
     except store.ResearchRunConflict as exc:
@@ -195,6 +220,64 @@ async def get_amazon_run(
     principal: tuple[User, Tenant] = Depends(get_current_principal),
 ) -> AmazonResearchRun:
     return await _owned_run(_owner(principal), run_id)
+
+
+@router.get("/amazon/runs/{run_id}/reports", response_model=ResearchReportIndex)
+async def index_amazon_reports(
+    run_id: UUID, principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> ResearchReportIndex:
+    return build_report_index(await _owned_run(_owner(principal), run_id))
+
+
+@router.get("/amazon/runs/{run_id}/reports/{section}")
+async def read_amazon_report(
+    run_id: UUID, section: str,
+    principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> dict[str, str]:
+    run = await _owned_run(_owner(principal), run_id)
+    try:
+        markdown = await run_in_threadpool(
+            build_report_markdown, run, None if section == "full" else section,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="未找到该专题。") from exc
+    return {"markdown": markdown}
+
+
+@router.get("/amazon/runs/{run_id}/evidence", response_model=ResearchEvidenceBundle)
+async def read_amazon_evidence(
+    run_id: UUID, principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> ResearchEvidenceBundle:
+    run = await _owned_run(_owner(principal), run_id)
+    return await run_in_threadpool(build_evidence_bundle, run)
+
+
+@router.get("/amazon/runs/{run_id}/comparison", response_model=ResearchRunComparison)
+async def compare_amazon_history(
+    run_id: UUID, principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> ResearchRunComparison:
+    owner = _owner(principal)
+    run = await _owned_run(owner, run_id)
+    return compare_research_runs(run, await store.previous_run(owner, run))
+
+
+@router.get("/amazon/runs/{run_id}/samples/{asin}/store")
+@limiter.limit("8/minute")
+async def resolve_amazon_sample_store(
+    request: Request, run_id: UUID, asin: str = Path(pattern=r"^[A-Z0-9]{10}$"),
+    principal: tuple[User, Tenant] = Depends(get_current_principal),
+) -> dict[str, str]:
+    run = await _owned_run(_owner(principal), run_id)
+    if run.mode != "bestsellers" or not _has_sample(run, asin):
+        raise HTTPException(status_code=404, detail="未找到该榜单商品样本。")
+    # 榜单卡片通常不含店铺地址；只在用户点击时读取本站商品详情核对跳转来源。
+    async with amazon_public_client() as client:
+        listing = await collect_market_listing(client, asin)
+    if listing.problem:
+        raise HTTPException(status_code=502, detail=listing.problem)
+    if not listing.store_url:
+        raise HTTPException(status_code=404, detail="商品页未公开可用的品牌店铺链接。")
+    return {"url": listing.store_url}
 
 
 @router.post("/amazon/runs/{run_id}/retry", status_code=202, response_model=AmazonResearchRun)

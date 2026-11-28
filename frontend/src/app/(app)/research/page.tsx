@@ -21,6 +21,7 @@ import {
 import { AmazonCategoryFields, AmazonCategoryReport } from '@/components/research/AmazonCategoryReport'
 import { AmazonProductCostsFields, AmazonProductReport } from '@/components/research/AmazonProductReport'
 import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
+import { AmazonResearchWorkspace } from '@/components/research/AmazonResearchWorkspace'
 import { AmazonSkills } from '@/components/research/AmazonSkills'
 import { AmazonScriptTools } from '@/components/research/AmazonScriptTools'
 import { AmazonStoreProductMatrix } from '@/components/research/AmazonStoreProductMatrix'
@@ -35,6 +36,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api'
 import { readCategoryInputs, type CategoryInputs } from '@/lib/amazon-category'
 import { readProductCosts } from '@/lib/amazon-product'
+import type { AmazonResearchContext } from '@/lib/amazon-research-common'
 import {
   AMAZON_BRIEF_KEY,
   AMAZON_BRIEF_LIMIT,
@@ -305,17 +307,25 @@ export default function ResearchPage() {
     }
   }, [runningId])
 
-  async function runResearch(nextMode: ResearchMode, nextSource: string, samples = '', category?: CategoryInputs, productCosts?: ReturnType<typeof readProductCosts>) {
+  async function runResearch(nextMode: ResearchMode, nextSource: string, options: {
+    samples?: string
+    category?: CategoryInputs
+    productCosts?: ReturnType<typeof readProductCosts>
+    context?: AmazonResearchContext
+    supplementalNotes?: string
+  } = {}) {
     if (loading || !nextSource.trim()) return
     setLoading(true)
     setError('')
     setPollError('')
-    const body = { mode: nextMode, source: nextSource.trim(), keyword: keyword.trim(), review_samples: samples }
+    const body = { mode: nextMode, source: nextSource.trim(), keyword: keyword.trim(), review_samples: options.samples ?? '' }
     try {
       const result = await api.post<AmazonRun>('/v1/research/amazon/runs', {
         ...body,
-        category: nextMode === 'bestsellers' ? category : undefined,
-        product_costs: nextMode === 'product' ? productCosts ?? undefined : undefined,
+        category: nextMode === 'bestsellers' ? options.category : undefined,
+        product_costs: nextMode === 'product' ? options.productCosts ?? undefined : undefined,
+        context: options.context,
+        supplemental_notes: options.supplementalNotes,
         submission_id: crypto.randomUUID(),
       })
       setRun(result)
@@ -334,18 +344,36 @@ export default function ResearchPage() {
       const form = new FormData(event.currentTarget)
       const category = mode === 'bestsellers' ? readCategoryInputs(form) : undefined
       const productCosts = mode === 'product' ? readProductCosts(form) : undefined
-      void runResearch(mode, source, mode === 'product' ? reviewSamples : '', category, productCosts)
+      void runResearch(mode, source, { samples: mode === 'product' ? reviewSamples : '', category, productCosts,
+        supplementalNotes: String(form.get('supplemental-notes') ?? '').trim() })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '请检查类目调研参数。')
     }
   }
 
-  function openRelated(nextMode: ResearchMode, url: string) {
+  function openRelated(nextMode: ResearchMode, url: string, asin?: string, direction?: string) {
     if (loading) return
     setMode(nextMode)
     setSource(url)
     setReviewSamples('')
-    void runResearch(nextMode, url)
+    const sampleAsin = asin ?? (nextMode === 'product' ? url.match(/\/dp\/([A-Z0-9]{10})(?:[/?#]|$)/i)?.[1]?.toUpperCase() : run?.report?.product?.asin)
+    const context = run && run.mode !== nextMode && (nextMode !== 'product' || sampleAsin)
+      ? { run_id: run.id, asin: sampleAsin, direction: direction?.slice(0, 240) } : undefined
+    return runResearch(nextMode, url, { context })
+  }
+
+  async function openCategoryStore(asin: string, direction: string) {
+    if (!run || loading) return
+    setLoading(true)
+    setError('')
+    try {
+      const { url } = await api.get<{ url: string }>(`/v1/research/amazon/runs/${run.id}/samples/${asin}/store`)
+      await openRelated('store', url, asin, direction)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '未能核对该商品的品牌店铺。')
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function loadServerHistory(before?: string) {
@@ -571,6 +599,12 @@ export default function ResearchPage() {
         )}
         {mode === 'bestsellers' && <AmazonCategoryFields key={run?.mode === 'bestsellers' ? run.id : 'new-category'} saved={run?.mode === 'bestsellers' ? run.inputs.category : undefined} />}
         {mode === 'product' && <AmazonProductCostsFields key={run?.mode === 'product' ? run.id : 'new-product'} saved={run?.mode === 'product' ? run.inputs.product_costs : undefined} />}
+        <details className="text-sm">
+          <summary className="w-fit cursor-pointer font-medium text-muted-foreground">补充公开或授权资料（可选）</summary>
+          <Textarea key={run?.id ?? mode} name="supplemental-notes" aria-label="补充公开或授权资料" maxLength={2000}
+            className="mt-2" defaultValue={run?.mode === mode ? run.inputs.supplemental_notes : ''}
+            placeholder="说明可引用的资料、来源与采集日期；不要填写凭证或个人信息。补充资料不计入公开样本统计。" />
+        </details>
         <p className="sr-only" role="status">{loading ? '正在读取 Amazon 页面' : report ? '调研报告已就绪' : ''}</p>
       </form>
 
@@ -584,9 +618,10 @@ export default function ResearchPage() {
       )}
 
       {run && <AmazonRunDetails key={run.id} run={run} busy={loading} pollError={pollError} onRetry={(target, key) => void retryRun(target, key)} />}
+      {run && <AmazonResearchWorkspace run={run} busy={loading} onOpen={(id) => void openRun(id)} onRetryTranslation={() => void retryRun('translation')} />}
 
       {run?.mode === 'product' && <AmazonProductReport key={run.id} run={run} onBrief={sendBrief} onStore={(url) => openRelated('store', url)} />}
-      {run?.mode === 'bestsellers' && <AmazonCategoryReport run={run} onProduct={(url) => openRelated('product', url)} />}
+      {run?.mode === 'bestsellers' && <AmazonCategoryReport run={run} busy={loading} onProduct={(url, asin, direction) => openRelated('product', url, asin, direction)} onStore={(asin, direction) => void openCategoryStore(asin, direction)} />}
       {run?.mode === 'store' && run.snapshot.product_matrix && <AmazonStoreProductMatrix key={'matrix-' + run.id} run={run} matrix={run.snapshot.product_matrix} onOpen={(id) => void openRun(id)} />}
       {run?.snapshot.competition && !activeAmazonRun(run) && <AmazonStoreBenchmarks competition={run.snapshot.competition} />}
       {run?.snapshot.revenue && <AmazonStoreRevenue run={run} revenue={run.snapshot.revenue} />}

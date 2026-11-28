@@ -17,17 +17,31 @@ RunStatus = Literal[
     "queued", "running", "done", "partial_fail", "failed", "queue_failed", "interrupted"
 ]
 StepStatus = Literal["pending", "success", "empty", "incomplete", "failed"]
-RetryTarget = Literal["resume", "failed"]
+RetryTarget = Literal["resume", "failed", "translation"]
+TRANSLATION_KEYS = {
+    "store": "store-translation",
+    "bestsellers": "category-translation",
+    "product": "product-translation",
+}
 EvidenceKind = Literal[
     "section", "suggestions", "board", "analysis", "product", "search", "competitor", "reviews"
 ]
 
 
+class AmazonResearchContext(BaseModel):
+    run_id: UUID
+    asin: str | None = Field(default=None, pattern=r"^[A-Z0-9]{10}$")
+    direction: str | None = Field(default=None, max_length=240)
+
+
 class AmazonResearchRunRequest(AmazonResearchRequest):
     mode: ResearchMode = "store"
+    site: Literal["US"] = "US"
     submission_id: UUID | None = None
     category: CategoryInputs | None = None
     product_costs: ProductCosts | None = None
+    context: AmazonResearchContext | None = None
+    supplemental_notes: str = Field(default="", max_length=2000)
 
 
 class AmazonStoreSample(AmazonListing):
@@ -276,6 +290,7 @@ class AmazonResearchSnapshot(BaseModel):
     revenue: AmazonStoreRevenue | None = None
     translation_status: StepStatus = "pending"
     translation_missing: list[str] = Field(default_factory=list)
+    field_translations: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
 

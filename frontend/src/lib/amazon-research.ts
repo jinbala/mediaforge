@@ -1,5 +1,6 @@
 import type { CategoryAnalysis, CategoryInputs } from './amazon-category'
 import type { ProductCosts, ProductDepth } from './amazon-product'
+import type { AmazonResearchContext } from './amazon-research-common'
 
 export type ResearchMode = 'product' | 'bestsellers' | 'store'
 
@@ -189,7 +190,7 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
 
 export type AmazonRunStatus = 'queued' | 'running' | 'done' | 'partial_fail' | 'failed' | 'queue_failed' | 'interrupted'
 export type AmazonStepStatus = 'pending' | 'success' | 'empty' | 'incomplete' | 'failed'
-export type AmazonRetryTarget = 'resume' | 'failed'
+export type AmazonRetryTarget = 'resume' | 'failed' | 'translation'
 export type AmazonRunSummary = {
   id: string
   mode: ResearchMode
@@ -370,7 +371,7 @@ export type AmazonStoreRevenue = {
 
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
-  inputs: { source: string; keyword: string; review_samples: string; category?: CategoryInputs | null; product_costs?: ProductCosts | null }
+  inputs: { source: string; keyword: string; review_samples: string; site?: 'US'; category?: CategoryInputs | null; product_costs?: ProductCosts | null; context?: AmazonResearchContext | null; supplemental_notes?: string }
   report: AmazonReport | null
   snapshot: {
     version: number
@@ -388,6 +389,7 @@ export type AmazonRun = AmazonRunSummary & {
     } | null
     translation_status: AmazonStepStatus
     translation_missing: string[]
+    field_translations?: Record<string, string>
     notes: string[]
     evidence: AmazonEvidence[]
     asin_sources: Record<string, string[]>

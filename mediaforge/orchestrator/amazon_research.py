@@ -44,7 +44,13 @@ from mediaforge.rag.amazon_store_collection import (
     page_id,
     section_step,
 )
-from mediaforge.rag.amazon_store_translation import localize_research_fields
+from mediaforge.rag.amazon_store_translation import (
+    DetailField,
+    TranslationInputs,
+    TranslationStage,
+    localize_research_fields,
+    product_detail_fields,
+)
 
 
 def _update_report(run: AmazonResearchRun) -> list[AmazonStoreSample]:
@@ -55,7 +61,9 @@ def _update_report(run: AmazonResearchRun) -> list[AmazonStoreSample]:
     return listings
 
 
-async def _collect_sections(client: httpx.AsyncClient, run: AmazonResearchRun, token: UUID) -> None:
+async def _collect_sections(
+    client: httpx.AsyncClient, run: AmazonResearchRun, token: UUID, translation: TranslationStage,
+) -> None:
     snapshot = run.snapshot
     pending = [
         item for item in snapshot.evidence if item.kind == "section" and item.status == "pending"
@@ -79,6 +87,7 @@ async def _collect_sections(client: httpx.AsyncClient, run: AmazonResearchRun, t
                 i for i, previous in enumerate(snapshot.evidence) if previous.key == item.key
             )
             snapshot.evidence[index] = item
+            translation.refresh()
             logger.info(
                 "Amazon research run={} item={} status={} reason={} count={} duration_ms={}",
                 run.id,
@@ -143,21 +152,22 @@ async def _collect_suggestions(client: httpx.AsyncClient, run: AmazonResearchRun
     snapshot.suggestions = suggestions or []
 
 
-async def _collect_store(run: AmazonResearchRun, token: UUID) -> bool:
+async def _collect_store(
+    run: AmazonResearchRun, token: UUID, translation: TranslationStage,
+) -> bool:
     snapshot = run.snapshot
-    snapshot.product_matrix = None
     if snapshot.store_scope is None:
         # 保存任务当时的样本边界，之后导出历史时无需以当前配置猜测。
         snapshot.store_scope = AmazonStoreSampleScope(
             section_limit=SECTION_LIMIT,
             asin_limit_per_section=SECTION_ASIN_LIMIT,
         )
-    if not snapshot.evidence:
+    if not any(item.kind == "section" for item in snapshot.evidence):
         snapshot.evidence.append(section_step(run.source, "提交的店铺或栏目"))
         await store.checkpoint(run, token, "section")
     async with amazon_public_client() as client:
         while True:
-            await _collect_sections(client, run, token)
+            await _collect_sections(client, run, token, translation)
             sections = [item for item in snapshot.evidence if item.kind == "section"]
             added, snapshot.store_root, limited = discover_sections(
                 sections,
@@ -168,6 +178,7 @@ async def _collect_store(run: AmazonResearchRun, token: UUID) -> bool:
                 snapshot.store_scope.navigation_truncated = limited
             _mark_redirect_aliases(run)
             snapshot.evidence.extend(added)
+            translation.refresh()
             _update_report(run)
             await store.checkpoint(run, token, "section")
             if not added:
@@ -176,32 +187,30 @@ async def _collect_store(run: AmazonResearchRun, token: UUID) -> bool:
     return limited
 
 
-async def _localize(run: AmazonResearchRun) -> None:
+def _translation_inputs(run: AmazonResearchRun) -> TranslationInputs:
     snapshot = run.snapshot
     sections = [
         item
         for item in snapshot.evidence
         if item.kind == "section" and item.title != "提交的店铺或栏目"
     ]
-    fields = []
-    for item in sections:
-        if item.title.startswith("Amazon.com:") and item.role == "home":
-            brand = item.title.split(":", 2)[1].strip()
-            item.title_zh = f"{brand} 品牌店铺" if brand else None
-        else:
-            fields.append(item)
+    fields = [
+        item for item in sections
+        if not (item.title.startswith("Amazon.com:") and item.role == "home")
+    ]
     products = [product for item in sections for product in item.products]
     variants = [product.store_variant for product in products if product.store_variant]
-    try:
-        snapshot.translation_missing = await localize_research_fields(
-            fields + products + variants, variants
-        )
-        snapshot.translation_status = "incomplete" if snapshot.translation_missing else "success"
-    except Exception as exc:
-        snapshot.translation_status = "failed"
-        logger.warning(
-            "Amazon research run={} phase=translation reason={}", run.id, type(exc).__name__
-        )
+    details = [DetailField("category", item.product_type) for item in products if item.product_type]
+    if snapshot.competition:
+        details.extend(product_detail_fields(snapshot.competition.listings.values()))
+    return TranslationInputs([*fields, *products, *variants], variants, details)
+
+
+def _localize_store_heading(run: AmazonResearchRun) -> None:
+    for item in run.snapshot.evidence:
+        if item.kind == "section" and item.role == "home" and item.title.startswith("Amazon.com:"):
+            if brand := item.title.split(":", 2)[1].strip():
+                item.title_zh = f"{brand} 品牌店铺"
 
 
 async def _report_store_lifecycle(
@@ -239,18 +248,29 @@ async def _report_competition(
     run: AmazonResearchRun,
     token: UUID,
     products: list[AmazonStoreSample],
+    translation: TranslationStage,
 ) -> None:
     targets = benchmark_targets(run.snapshot, products)
+    previous = run.snapshot.competition
     competition = AmazonStoreCompetition(targets=[item.asin for item in targets])
+    if previous and previous.targets == competition.targets:
+        competition.listings.update(previous.listings)
+        competition.searches.extend(previous.searches)
+        competition.pairs.extend(previous.pairs)
     run.snapshot.competition = competition
     if not targets:
         return
+    translation.refresh()
     await store.checkpoint(run, token, "competition")
     async with amazon_public_client() as client:
         # 按公示产品类型挑两个代表款，每次两条搜索，每条按相关度最多核对两件。
-        details = await asyncio.gather(
-            *(collect_market_listing(client, item.asin) for item in targets)
-        )
+        async def read_listing(asin: str):
+            saved = competition.listings.get(asin)
+            if saved and not saved.problem:
+                return saved
+            return await collect_market_listing(client, asin)
+
+        details = await asyncio.gather(*(read_listing(item.asin) for item in targets))
         queries = []
         for sample, listing in zip(targets, details, strict=True):
             if listing.title:
@@ -259,8 +279,16 @@ async def _report_competition(
             competition.listings[listing.asin] = listing
             if query := market_query(sample, listing):
                 queries.append((listing.asin, query))
+
+        async def read_search(asin: str, query: str):
+            saved = next((
+                item for item in competition.searches
+                if item.target_asin == asin and item.query == query and item.status != "failed"
+            ), None)
+            return saved or await collect_benchmark_search(client, asin, query)
+
         competition.searches = await asyncio.gather(
-            *(collect_benchmark_search(client, asin, query) for asin, query in queries)
+            *(read_search(asin, query) for asin, query in queries)
         )
         own_asins = {item.asin for item in products}
         own_brands = {item.brand.casefold() for item in targets if item.brand}
@@ -274,13 +302,18 @@ async def _report_competition(
             for search in competition.searches
         }
         # 每批最多两个详情并发。搜索结果先保存，后续详情缺失时也能查找来源。
+        translation.refresh()
         await store.checkpoint(run, token, "competition")
         candidates = list(dict.fromkeys(asin for group in selected.values() for asin in group))
         for pos in range(0, len(candidates), 2):
             listings = await asyncio.gather(
-                *(collect_market_listing(client, asin) for asin in candidates[pos : pos + 2])
+                *(read_listing(asin) for asin in candidates[pos : pos + 2])
             )
             competition.listings.update((item.asin, item) for item in listings)
+        active_asins = set(competition.targets) | set(candidates)
+        competition.listings = {
+            asin: item for asin, item in competition.listings.items() if asin in active_asins
+        }
         competition.pairs = [
             pair
             for target, rivals in selected.items()
@@ -331,9 +364,11 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         if run.mode == "product":
             await collect_product_depth(run, token)
             return False
-        limited = await _collect_store(run, token)
-        await store.checkpoint(run, token, "translation")
-        await _localize(run)
+        translation = TranslationStage(
+            run, "store-translation", "补充店铺中文字段",
+            lambda: _translation_inputs(run), lambda stage: store.checkpoint(run, token, stage),
+        )
+        limited = await _collect_store(run, token, translation)
         scope = snapshot.store_scope
         snapshot.notes = [
             f"采集范围最多 {scope.section_limit} 个栏目，"
@@ -343,13 +378,20 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
             snapshot.notes.append("达到栏目数量上限，部分已发现的栏目尚未采集。")
         if not snapshot.store_root:
             snapshot.notes.append("公开导航未确认首页，报告首页链接暂用本次提交地址。")
+        _localize_store_heading(run)
+        listings = _update_report(run)
+        snapshot.product_matrix = build_product_matrix(snapshot, listings)
+        if run.stage != "retry-translation" or snapshot.lifecycle is None:
+            await _report_store_lifecycle(run, token, listings)
+        if run.stage != "retry-translation" or snapshot.competition is None:
+            await _report_competition(run, token, listings, translation)
+        await translation.execute(localize_research_fields, lambda: _update_report(run))
         if snapshot.translation_status in {"incomplete", "failed"}:
             snapshot.notes.append("部分店铺字段未取得中文译文，仍可查看原文和对应商品。")
         listings = _update_report(run)
         snapshot.product_matrix = build_product_matrix(snapshot, listings)
-        await _report_store_lifecycle(run, token, listings)
-        await _report_competition(run, token, listings)
-        await _report_revenue(run, token, listings)
+        if run.stage != "retry-translation":
+            await _report_revenue(run, token, listings)
         sections = [
             item
             for item in snapshot.evidence
@@ -366,7 +408,8 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
             or any(search.status == "failed" for search in snapshot.competition.searches)
             or any(item.problem for item in snapshot.competition.listings.values())
             or any(
-                item.listing and item.listing.problem for item in snapshot.revenue.samples
+                item.listing and item.listing.problem
+                for item in (snapshot.revenue.samples if snapshot.revenue else [])
             )
         )
         status = "failed" if not useful else "partial_fail" if partial else "done"

@@ -498,8 +498,10 @@ async def test_run_saves_applied_sampling_limits_and_preserves_page_fields(api, 
         "asin_limit_per_section": 30,
         "navigation_truncated": True,
     }
-    assert len(snapshot["evidence"]) == 2
-    for index, section in enumerate(snapshot["evidence"]):
+    sections = [item for item in snapshot["evidence"] if item["kind"] == "section"]
+    assert len(sections) == 2
+    assert any(item["key"] == "store-translation" for item in snapshot["evidence"])
+    for index, section in enumerate(sections):
         assert section["collected_at"] and section["url"] and section["method"]
         assert section["observed_count"] == 1
         item = section["products"][0]

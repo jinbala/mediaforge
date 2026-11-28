@@ -33,9 +33,22 @@ export function AmazonCategoryFields({ saved }: { saved?: AmazonRun['inputs']['c
   </details>
 }
 
-export function AmazonCategoryReport({ run, onProduct }: { run: AmazonRun; onProduct: (url: string) => void }) {
+export function AmazonCategoryReport({ run, busy, onProduct, onStore }: {
+  run: AmazonRun
+  busy: boolean
+  onProduct: (url: string, asin: string, direction: string) => void
+  onStore: (asin: string, direction: string) => void
+}) {
   const boards = run.snapshot.evidence.filter((item) => item.kind === 'board')
   const analysis = run.snapshot.category_analysis
+  const products = new Map(run.report?.listings.map((item) => [item.asin, item]))
+  const actions = (asin: string, direction: string) => <div className="flex flex-wrap gap-1">
+    <Button type="button" variant="ghost" size="sm" disabled={busy || !products.has(asin)} onClick={() => {
+      const product = products.get(asin)
+      if (product) onProduct(product.url, asin, direction)
+    }}>调研单品</Button>
+    <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => onStore(asin, direction)}>调研品牌店铺</Button>
+  </div>
   const file = (contents: string, suffix: string, type?: string) => downloadAmazonFile(contents, `${run.id}-${suffix}`, type)
   return <article className="space-y-4 rounded-lg border bg-card p-4" aria-label="类目深调研报告">
     <header className="flex flex-wrap items-start justify-between gap-3">
@@ -58,7 +71,7 @@ export function AmazonCategoryReport({ run, onProduct }: { run: AmazonRun; onPro
           <td className="min-w-32 p-2"><details><summary>{row.asins.length} 个 ASIN</summary>{row.asins.map((asin) => <div key={asin}>{(run.snapshot.asin_sources[asin] ?? []).map((key) => {
             const id = amazonEvidenceSampleId(key, asin)
             return <a key={key} href={'#' + id} onClick={() => revealAmazonSample(id)} className="block text-primary">{asin} · {boards.find((board) => board.key === key)?.title_zh ?? boards.find((board) => board.key === key)?.title ?? '榜单'}</a>
-          })}</div>)}</details></td></tr>)}</tbody>
+          })}{section.key === 'opportunities' && actions(asin, `${section.title} · ${row.cells[0] ?? ''}`)}</div>)}</details></td></tr>)}</tbody>
       </table></div>)}
     </section>)}
     <section className="space-y-3 border-t pt-3" aria-label="逐榜样本">
@@ -71,7 +84,7 @@ export function AmazonCategoryReport({ run, onProduct }: { run: AmazonRun; onPro
           {product.image_url && <a className="text-primary" href={product.image_url} target="_blank" rel="noreferrer">主图</a>}
           <div className="flex-1"><a className="text-primary" href={product.url} target="_blank" rel="noreferrer">{product.rank ?? '排名未知'} · {product.title_zh ?? product.title}</a>
             <p>{product.asin} · {product.price ?? '缺价'} {product.price_currency ?? ''} · {product.rating ?? '缺评分'} / {product.rating_count ?? '缺评分数'}</p></div>
-          <Button type="button" variant="ghost" size="sm" onClick={() => onProduct(product.url)}>调研单品</Button>
+          {actions(product.asin, board.title_zh ?? board.title)}
         </li>)}</ul>
       </details>)}
     </section>

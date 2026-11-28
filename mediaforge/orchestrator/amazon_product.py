@@ -9,7 +9,7 @@ from loguru import logger
 from mediaforge.db import amazon_research_store as store
 from mediaforge.models.amazon_product import ProductDepth, ReviewBucket
 from mediaforge.models.amazon_research import AmazonResearchReport
-from mediaforge.models.amazon_research_run import AmazonEvidence, AmazonResearchRun
+from mediaforge.models.amazon_research_run import AmazonEvidence, AmazonResearchRun, EvidenceKind
 from mediaforge.rag.amazon_product_collection import (
     MAX_REVIEW_ROWS,
     choose_competitors,
@@ -20,7 +20,12 @@ from mediaforge.rag.amazon_product_collection import (
     review_url,
 )
 from mediaforge.rag.amazon_research import AmazonFetchError, amazon_public_client, search_url
-from mediaforge.rag.amazon_store_translation import localize_research_fields
+from mediaforge.rag.amazon_store_translation import (
+    TranslationInputs,
+    TranslationStage,
+    localize_research_fields,
+    product_detail_fields,
+)
 from mediaforge.workers.amazon_product_analysis import analyze_product
 
 MAX_COMPETITORS = 4
@@ -42,7 +47,7 @@ class ProductResearchSteps:
         self.items = {item.key: item for item in run.snapshot.evidence}
         self.changed = False
 
-    def register(self, key: str, kind: str, title: str, url: str) -> AmazonEvidence:
+    def register(self, key: str, kind: EvidenceKind, title: str, url: str) -> AmazonEvidence:
         if key not in self.items:
             item = AmazonEvidence(key=key, kind=kind, title=title, url=url)
             self.items[key] = item
@@ -94,7 +99,9 @@ class ProductResearchSteps:
         await self.checkpoint(stage)
 
 
-async def _sample(steps: ProductResearchSteps, depth: ProductDepth) -> None:
+async def _sample(
+    steps: ProductResearchSteps, depth: ProductDepth, translation: TranslationStage,
+) -> None:
     run = steps.run
     main = steps.register("product", "product", "目标商品详情", run.source)
     await steps.checkpoint("product")
@@ -102,6 +109,7 @@ async def _sample(steps: ProductResearchSteps, depth: ProductDepth) -> None:
 
         def save_overview(page):
             depth.overview = page
+            translation.refresh()
             _publish(run, depth)
             return page.product.url, page.collected_at, 1
 
@@ -154,7 +162,10 @@ async def _sample(steps: ProductResearchSteps, depth: ProductDepth) -> None:
                     raise AmazonFetchError(
                         "竞品链接返回了不同 ASIN。", "asin_mismatch", page.product.url
                     )
-                depth.competitors.append(page)
+                depth.competitors = [
+                    old for old in depth.competitors if old.product.asin != candidate.asin
+                ] + [page]
+                translation.refresh()
                 return page.product.url, page.collected_at, 1
 
             await steps.collect(
@@ -203,35 +214,12 @@ def _publish(run: AmazonResearchRun, depth: ProductDepth) -> None:
         )
 
 
-async def _translate(steps: ProductResearchSteps, depth: ProductDepth) -> None:
-    run = steps.run
+def _translation_inputs(depth: ProductDepth) -> TranslationInputs:
     if depth.overview is None:
-        return
-    row = steps.register("product-translation", "analysis", "补充商品中文字段", run.source)
-    row.method = "现有词表与已配置文本模型"
-    pages = [depth.overview, *depth.competitors]
-    # 成功子项不重跑；新增未译详情时翻译器会保留已有译文，仅补缺项。
-    if row.status != "pending" and not (steps.changed and row.observed_count != len(pages)):
-        return
-    row.attempts += 1
-    row.observed_count = len(pages)
-    row.collected_at = datetime.now(UTC)
-    try:
-        missing = await localize_research_fields([page.product for page in pages], [])
-        run.snapshot.translation_missing = missing
-        row.status = "incomplete" if missing else "success"
-        row.code = None
-        row.reason = "部分商品未取得译文，保留原文和来源。" if missing else None
-        steps.changed = True
-    except Exception as exc:
-        row.status, row.code = "failed", "translation_error"
-        row.reason = "翻译失败；可单独重试，原文和已采样本不受影响。"
-        logger.warning(
-            "Amazon product run={} phase=translation error={}", run.id, type(exc).__name__
-        )
-    run.snapshot.translation_status = row.status
-    _publish(run, depth)
-    await steps.checkpoint("product-translation")
+        return TranslationInputs()
+    products = [page.product for page in [depth.overview, *depth.competitors]]
+    variants = [item.store_variant for item in products if item.store_variant]
+    return TranslationInputs([*products, *variants], variants, product_detail_fields(products))
 
 
 async def _analyze(steps: ProductResearchSteps, depth: ProductDepth) -> None:
@@ -240,6 +228,8 @@ async def _analyze(steps: ProductResearchSteps, depth: ProductDepth) -> None:
     row.method = "基于同一快照的版本化规则"
     if row.status != "pending" and not steps.changed:
         return
+    await steps.checkpoint("product-analysis")
+    started = monotonic()
     row.attempts += 1
     row.collected_at = datetime.now(UTC)
     try:
@@ -250,6 +240,7 @@ async def _analyze(steps: ProductResearchSteps, depth: ProductDepth) -> None:
         row.status, row.code = "failed", "analysis_error"
         row.reason = "专题分析失败；已采集证据仍可查看，可重试分析。"
         logger.error("Amazon product run={} phase=analysis error={}", run.id, type(exc).__name__)
+    row.duration_ms = round((monotonic() - started) * 1000)
     await steps.checkpoint("product-analysis")
 
 
@@ -258,15 +249,26 @@ async def collect_product_depth(run: AmazonResearchRun, token: UUID) -> None:
     depth = snapshot.product_depth or ProductDepth()
     snapshot.product_depth = depth
     steps = ProductResearchSteps(run, token)
-    await _sample(steps, depth)
-    await _translate(steps, depth)
+    translation = TranslationStage(
+        run,
+        "product-translation",
+        "补充商品中文字段",
+        lambda: _translation_inputs(depth),
+        steps.checkpoint,
+    )
+    await _sample(steps, depth, translation)
+    if depth.overview is not None:
+        translated = await translation.execute(
+            localize_research_fields, lambda: _publish(run, depth)
+        )
+        steps.changed |= translated and snapshot.translation_status != "failed"
     await _analyze(steps, depth)
     snapshot.notes = ["Amazon 美国站公开样本；搜索数据不代表搜索量、长期排名或市场份额。"]
     if snapshot.translation_status in {"failed", "incomplete"}:
         snapshot.notes.append("部分字段未取得中文译文，仍保留原文和对应来源链接。")
     _publish(run, depth)
     partial = any(
-        item.status in {"failed", "incomplete", "pending"} for item in steps.items.values()
+        item.status in {"failed", "incomplete", "pending"} for item in snapshot.evidence
     )
     await store.checkpoint(
         run,
