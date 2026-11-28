@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from mediaforge.models.amazon_image_reference import AmazonImageRole
 from mediaforge.models.job import (
     AssetOutput,
     GenerationContext,
@@ -19,6 +20,7 @@ from mediaforge.rag.vector_store import VectorStore
 from mediaforge.storage import get_storage
 from mediaforge.workers.base import WorkerResult
 from mediaforge.workers.compliance.checker import ComplianceChecker
+from mediaforge.workers.image.amazon_reference import load_amazon_reference
 from mediaforge.workers.platform_rules import (
     aspect_ratio_for as aspect_ratio_for,
 )
@@ -439,7 +441,7 @@ class BaseImageWorker(ABC):
         aspect_ratio: str,
         image_size: str,
         product_image_path: str,
-        ref_image_path: str | None,
+        ref_image_path: str | bytes | None,
         generated_image: bytes,
         product_attributes: dict | None = None,
         variant: str | None = None,
@@ -1020,6 +1022,24 @@ class BaseImageWorker(ABC):
         sku_context = sku.model_dump()
         sku_context["_output_type"] = self.output_type
         sku_context["_current_platform"] = platform
+        # 选中的图只应用到对应的 Amazon 图位，其他图位沿用已有的商品与风格上下文。
+        amazon_role: AmazonImageRole | None = None
+        if platform == "amazon":
+            if self.output_type == "main_image":
+                amazon_role = "main"
+            elif self.output_type == "detail_page" and variant in ("scene", "feature", "closeup"):
+                amazon_role = variant
+        amazon_reference = sku.amazon_image_references.get(amazon_role) if amazon_role else None
+        if amazon_reference:
+            prompt += (
+                "\nFor this shot, the selected STYLE REFERENCE IMAGE controls framing, lighting, "
+                "background and pose where consistent with the shot role and platform rules. Favor it "
+                "over the general style guidance for these choices. Use an original execution with a "
+                "different model identity. Do not copy its product, text, logos, graphics or labels. "
+                "The SOURCE PRODUCT IMAGE is authoritative for all garment and product details."
+            )
+            if amazon_reference.direction.strip():
+                prompt += f"\nShot-specific direction: {amazon_reference.direction.strip()}"
         if self.repair_instruction:
             prompt += f"\nAdditional product image composition requirements: {self.repair_instruction}"
         compliance = checker.check(sku_context, prompt)
@@ -1085,7 +1105,12 @@ class BaseImageWorker(ABC):
             )
         saved_path: str | None = None
         try:
-            effective_ref: str | bytes | None = ref_image_path
+            # 只下载一次，生成与审核都使用这一份图片字节，避免访问会跳转的外部 URL。
+            shot_reference = (
+                await load_amazon_reference(amazon_reference.image_url)
+                if amazon_reference else ref_image_path
+            )
+            effective_ref = shot_reference
             strict_catalog_image = (
                 self.output_type == "main_image" and platform.lower() == "amazon"
             ) or self.output_type == "pdd_white_background"
@@ -1103,7 +1128,7 @@ class BaseImageWorker(ABC):
                     size=sku.image_size,
                     aspect_ratio=aspect_ratio,
                     product_image_path=None,
-                    ref_image_path=ref_image_path,
+                    ref_image_path=shot_reference,
                 )
             image_bytes = await self.client.generate_image(
                 prompt=compliance.modified_prompt,
@@ -1132,7 +1157,7 @@ class BaseImageWorker(ABC):
                 aspect_ratio=aspect_ratio,
                 image_size=sku.image_size,
                 product_image_path=product_image_path,
-                ref_image_path=ref_image_path,
+                ref_image_path=shot_reference,
                 generated_image=image_bytes,
                 product_attributes=(
                     generation_context.product_attributes if generation_context else None

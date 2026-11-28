@@ -1,9 +1,12 @@
 'use client'
 
 import { useState } from 'react'
-import { Loader2, Trash2, Upload } from 'lucide-react'
+import Image from 'next/image'
+import Link from 'next/link'
+import { ImageOff, Loader2, Trash2, Upload } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { AMAZON_IMAGE_ROLES, AMAZON_REFERENCE_DIRECTION_LIMIT, amazonImageRoles, cleanAmazonImageReferences } from '@/lib/amazon-image-references'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -23,7 +26,7 @@ import {
   platformRuleSummary,
   STYLE_PRESETS,
 } from '@/lib/sku-options'
-import type { ModelPreference, OutputType, PresentationMode, ReferenceMode } from '@/types/job'
+import type { AmazonImageReferences, ModelPreference, OutputType, PresentationMode, ReferenceMode } from '@/types/job'
 
 export type Sku = {
   sku_id: string
@@ -33,6 +36,7 @@ export type Sku = {
   target_platforms: string
   output_types: OutputType[]
   style_hint: string
+  amazon_image_references?: AmazonImageReferences
   presentation_mode: PresentationMode
   model_preference: ModelPreference
   market: string
@@ -63,12 +67,15 @@ export function SkuForm({
   singleScreen = false,
 }: SkuFormProps) {
   const [uploading, setUploading] = useState(false)
+  const [failedReferences, setFailedReferences] = useState<string[]>([])
   const update = (updates: Partial<Sku>) => onChange({ ...sku, ...updates })
 
   const selectedPlatforms = sku.target_platforms.split(',').map((value) => value.trim()).filter(Boolean)
   const detailPageSelected = sku.output_types.includes('detail_page')
   const pddSelected = selectedPlatforms.includes('pinduoduo')
   const pddWhiteSelected = sku.output_types.includes('pdd_white_background')
+  const amazonReferences = cleanAmazonImageReferences(sku.amazon_image_references)
+  const selectedReferenceRoles = amazonImageRoles.filter((role) => amazonReferences[role])
 
   const toggleDetailPage = () => {
     update({
@@ -132,6 +139,42 @@ export function SkuForm({
           )}
         </div>
       )}
+
+      {/* 调研带入时会写入参考图字段，空映射也要显示，方便核对只带入文案的情况。 */}
+      {showGenerationSettings && sku.amazon_image_references !== undefined && <section className="space-y-2 rounded-md border border-primary/25 bg-muted/10 p-3" aria-label="亚马逊逐图参考">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <h3 className="text-sm font-medium">亚马逊参考图 · {selectedReferenceRoles.length} 张</h3>
+          {selectedReferenceRoles.length === 0 && <Link href="/research" className="text-xs text-primary underline-offset-4 hover:underline">去亚马逊调研选图</Link>}
+        </div>
+        {selectedReferenceRoles.length === 0 ? <p className="text-xs text-muted-foreground">
+          {sku.style_hint.trim() ? '当前仅有文字需求。' : '当前没有亚马逊参考图。'} 可在调研结果的「逐张借鉴商品图」为各图位选择图片。
+        </p> : <div className="grid gap-2 sm:grid-cols-2">
+          {selectedReferenceRoles.map((role) => {
+            const reference = amazonReferences[role]!
+            const { label, output } = AMAZON_IMAGE_ROLES[role]
+            const applies = selectedPlatforms.includes('amazon') && sku.output_types.includes(output)
+            return <div className="flex min-w-0 items-start gap-3 rounded-md border bg-background p-2" key={role}>
+              <a href={reference.image_url} target="_blank" rel="noreferrer" aria-label={`查看${label}参考原图`} className="grid h-20 w-20 shrink-0 place-items-center overflow-hidden rounded border bg-white focus-visible:outline-2 focus-visible:outline-primary" title="在新标签页查看原图">
+                {failedReferences.includes(reference.image_url)
+                  ? <span className="grid justify-items-center gap-1 text-[10px] text-slate-600"><ImageOff size={16} aria-hidden="true" />预览失败</span>
+                  : <Image src={reference.image_url} alt={`${label}参考`} width={80} height={80} className="h-full w-full object-contain" unoptimized referrerPolicy="no-referrer"
+                    onError={() => setFailedReferences((current) => [...current, reference.image_url])} />}
+              </a>
+              <label className="min-w-0 flex-1 space-y-1 text-xs">
+                <span className="font-medium">{label}借鉴要求</span>
+                <Textarea value={reference.direction} maxLength={AMAZON_REFERENCE_DIRECTION_LIMIT} className="min-h-12 text-xs"
+                  onChange={(event) => update({ amazon_image_references: { ...amazonReferences, [role]: { ...reference, direction: event.target.value } } })} />
+                {!applies && <span className="block text-muted-foreground">当前输出未启用此参考图</span>}
+              </label>
+              <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`移除${label}参考`} onClick={() => {
+                const remaining = { ...amazonReferences }
+                delete remaining[role]
+                update({ amazon_image_references: remaining })
+              }}><Trash2 className="size-4" aria-hidden="true" /></Button>
+            </div>
+          })}
+        </div>}
+      </section>}
 
       <div className={singleScreen ? 'space-y-2' : 'space-y-3'}>
         <div className={embedded ? `grid ${singleScreen ? 'gap-2 lg:grid-cols-[112px_minmax(0,1fr)]' : 'gap-3 lg:grid-cols-[140px_minmax(0,1fr)]'}` : 'space-y-4'}>
@@ -298,7 +341,7 @@ export function SkuForm({
                 <SelectContent>
                   <SelectItem value="auto">自动匹配相似爆款</SelectItem>
                   <SelectItem value="specified">指定爆款商品</SelectItem>
-                  <SelectItem value="none">不使用参考</SelectItem>
+                  <SelectItem value="none">不使用爆款库参考</SelectItem>
                 </SelectContent>
               </Select>
               {sku.reference_mode === 'specified' && <div className="md:col-span-2"><ReferenceProductPicker compact={singleScreen} value={sku.ref_sku_id} onSelect={(product) => update({ ref_sku_id: product.sku_code })} /></div>}

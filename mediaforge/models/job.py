@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from mediaforge.models.amazon_image_reference import AmazonImageReference, AmazonImageRole
+
 
 class OutputType(StrEnum):
     main_image = "main_image"
@@ -29,6 +31,7 @@ class SkuInput(BaseModel):
     target_platforms: list[str] = Field(default_factory=list)
     output_types: list[str]
     style_hint: str | None = None
+    amazon_image_references: dict[AmazonImageRole, AmazonImageReference] = Field(default_factory=dict)
     presentation_mode: Literal["auto", "model_wear", "product_only"] = "auto"
     model_preference: Literal["auto", "female", "male", "no_face"] = "auto"
     market: str = Field(default="US", min_length=2, max_length=3)

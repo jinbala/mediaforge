@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from mediaforge.models.amazon_image_reference import amazon_image_url as _amazon_image_url
 from mediaforge.models.amazon_research import (
     AmazonListing,
     AmazonProduct,
@@ -23,7 +24,11 @@ from mediaforge.rag.amazon_store_translation import localize_amazon_store
 
 AMAZON = "https://www.amazon.com"
 SUGGESTIONS = "https://completion.amazon.com/api/2017/suggestions"
-IMAGE_HOSTS = {"m.media-amazon.com", "images-na.ssl-images-amazon.com"}
+MAX_PRODUCT_IMAGES = 24
+GALLERY_INITIAL = re.compile(
+    r'''(?:["']colorImages["']\s*:|\bcolorImages\s*=)\s*\{\s*["']initial["']\s*:\s*'''
+    r"(?:[\w$.]+\.parseJSON\(\s*')?"
+)
 ASIN = re.compile(r"[A-Z0-9]{10}", re.I)
 PRODUCT_PATH = re.compile(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})(?:/|$)", re.I)
 REVIEW_PATH = re.compile(r"/product-reviews/([A-Z0-9]{10})", re.I)
@@ -158,28 +163,6 @@ def _rating_count(value: str | None) -> str | None:
     return None
 
 
-def _amazon_image_url(value: object) -> str | None:
-    # 只将 Amazon 图片 CDN 上的商品图地址交给前端。
-    if not isinstance(value, str):
-        return None
-    url = value.strip()
-    if url.startswith("//"):
-        url = f"https:{url}"
-    if len(url) > 2000 or re.search(r"[\s\\\x00-\x1f\x7f]", url):
-        return None
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    if (
-        parsed.scheme == "https"
-        and parsed.netloc.lower() in IMAGE_HOSTS
-        and re.fullmatch(r"/images/I/[^/]+", parsed.path)
-    ):
-        return url
-    return None
-
-
 def _image_from_tag(image: Tag | None) -> str | None:
     if image is None:
         return None
@@ -194,6 +177,45 @@ def _image_from_tag(image: Tag | None) -> str | None:
     if isinstance(candidates, dict):
         return next((url for source in candidates if (url := _amazon_image_url(source))), None)
     return None
+
+
+def _product_gallery(soup: BeautifulSoup, main: str | None) -> list[str]:
+    images: list[str] = []
+    seen: set[str] = set()
+
+    def include(*urls: str | None) -> None:
+        candidates = [url for url in urls if url]
+        if not candidates or len(images) >= MAX_PRODUCT_IMAGES:
+            return
+        # 同一图可能带尺寸后缀，也可能另有缩略图 ID。记录同一条目里所有标识。
+        ids = {urlsplit(url).path.rsplit("/", 1)[-1].split(".", 1)[0] for url in candidates}
+        if ids.isdisjoint(seen):
+            images.append(candidates[0])
+        seen.update(ids)
+
+    # 只解码当前变体的 JSON 数组，包括 Amazon 放在 parseJSON 字符串里的数组。
+    decoder = json.JSONDecoder()
+    for script in soup.select("script"):
+        raw = script.string or script.get_text()
+        if len(raw) > 2_000_000 or not (match := GALLERY_INITIAL.search(raw)):
+            continue
+        try:
+            entries, _ = decoder.raw_decode(raw, match.end())
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entries, list):
+            for entry in entries[:MAX_PRODUCT_IMAGES]:
+                if isinstance(entry, dict) and entry.get("variant") != "VIDEO" and not entry.get("videoUrl"):
+                    include(*(_amazon_image_url(entry.get(key)) for key in ("hiRes", "large", "thumb")))
+            if images:
+                break
+    include(main)
+    for tag in soup.select(
+        "#altImages li.item:not(.videoThumbnail):not([data-action*='video']) img, "
+        "#imageBlockThumbs img", limit=MAX_PRODUCT_IMAGES,
+    ):
+        include(_amazon_image_url(tag.get("data-old-hires")) or _image_from_tag(tag))
+    return images
 
 
 def _collect_reviews(soup: BeautifulSoup, samples: str) -> list[AmazonReview]:
@@ -220,7 +242,7 @@ def _collect_reviews(soup: BeautifulSoup, samples: str) -> list[AmazonReview]:
     return reviews
 
 
-def _listing_structure(soup: BeautifulSoup, main: str | None) -> dict:
+def _listing_structure(soup: BeautifulSoup, gallery: list[str]) -> dict:
     category_path = list(dict.fromkeys(
         text for link in soup.select("#wayfinding-breadcrumbs_feature_div li a", limit=20)
         if (text := _text(link))
@@ -238,14 +260,6 @@ def _listing_structure(soup: BeautifulSoup, main: str | None) -> dict:
         if first_available := _text(value, 100):
             break
 
-    # 只数当前公开图组里能识别的商品图；同一图片的尺寸变换不重复计数。
-    urls = {main} if main else set()
-    for tag in soup.select(
-        "#altImages li.item:not(.videoThumbnail) img, #imageBlockThumbs img", limit=50
-    ):
-        if url := _image_from_tag(tag):
-            urls.add(url)
-    images = {urlsplit(url).path.split("/images/I/", 1)[1].split(".", 1)[0] for url in urls}
     aplus_blocks = soup.select(
         "#aplus, #aplus_feature_div, #aplusBrandStory_feature_div, "
         ".aplus-v2, .a-plus-content, #aplusPageWidget", limit=20,
@@ -254,7 +268,7 @@ def _listing_structure(soup: BeautifulSoup, main: str | None) -> dict:
         "description": _text(soup.select_one("#productDescription"), 5000),
         "category_path": category_path or None,
         "first_available": first_available,
-        "image_count": len(images) or None,
+        "image_count": len(gallery) or None,
         # 空占位不当作 A+；整块未返回时，也不能断言商品没有 A+。
         "has_aplus": any(_text(block) or block.select_one("img[src]")
                          for block in aplus_blocks) if aplus_blocks else None,
@@ -307,6 +321,7 @@ def _parse_product(soup: BeautifulSoup, url: str, samples: str) -> AmazonProduct
     image_url = _image_from_tag(image) or _amazon_image_url(
         social_image.get("content") if social_image else None
     )
+    gallery = _product_gallery(soup, image_url)
     return AmazonProduct(
         asin=url.rsplit("/", 1)[-1],
         title=title,
@@ -330,7 +345,8 @@ def _parse_product(soup: BeautifulSoup, url: str, samples: str) -> AmazonProduct
         reviews=reviews,
         review_topics=topics,
         image_brief="\n".join(brief),
-        **_listing_structure(soup, image_url),
+        gallery_image_urls=gallery,
+        **_listing_structure(soup, gallery),
     )
 
 
@@ -591,7 +607,7 @@ async def _read_body(response: httpx.Response, limit: int) -> bytes:
 
 
 async def _fetch_page(
-    client: httpx.AsyncClient, mode: ResearchMode | Literal["search", "reviews"], url: str
+    client: httpx.AsyncClient, mode: ResearchMode | Literal["search"], url: str
 ) -> tuple[str, bytes]:
     try:
         async with asyncio.timeout(16):

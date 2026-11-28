@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 
 import { AmazonCategoryFields, AmazonCategoryReport } from '@/components/research/AmazonCategoryReport'
+import { AmazonGalleryReferences } from '@/components/research/AmazonGalleryReferences'
 import { AmazonProductCostsFields, AmazonProductReport } from '@/components/research/AmazonProductReport'
 import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
 import { AmazonResearchWorkspace } from '@/components/research/AmazonResearchWorkspace'
@@ -66,6 +67,7 @@ import {
 } from '@/lib/amazon-research'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/store/auth'
+import type { AmazonImageReferences } from '@/types/job'
 
 const modes = [
   { value: 'product', label: '单品调研', hint: '卖点、排名与评论样本', sourceLabel: 'ASIN 或商品链接', placeholder: 'B0033SHO4Q 或 https://www.amazon.com/dp/…', icon: PackageSearch },
@@ -270,6 +272,7 @@ export default function ResearchPage() {
   const [run, setRun] = useState<AmazonRun | null>(null)
   const report = run ? run.report : legacyReport
   const [brief, setBrief] = useState('')
+  const [gallerySelection, setGallerySelection] = useState<{ reportKey: string; references: AmazonImageReferences } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [pollError, setPollError] = useState('')
@@ -459,11 +462,11 @@ export default function ResearchPage() {
     )
   }
 
-  function sendBrief(value = brief) {
+  function sendBrief(value = brief || galleryProduct?.image_brief || '') {
     try {
       // 正文暂存在当前标签页，地址栏只传 ID，图片创作页用它匹配这次带入的需求。
       const id = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, '0')).join('')
-      sessionStorage.setItem(AMAZON_BRIEF_KEY, JSON.stringify({ id, brief: value.trim() }))
+      sessionStorage.setItem(AMAZON_BRIEF_KEY, JSON.stringify({ id, brief: value.trim(), references }))
       router.push('/batch?' + AMAZON_BRIEF_PARAM + '=' + id)
     } catch {
       setError('带入失败，可复制图片需求后粘贴到图片创作。')
@@ -471,15 +474,38 @@ export default function ResearchPage() {
   }
 
   const product = report?.product
+  const productOverview = run?.snapshot.product_depth?.overview
+  const galleryProduct = productOverview?.product ?? product
+  const galleryKey = run?.id ?? (galleryProduct ? galleryProduct.asin + ':' + report?.collected_at : '')
+  // 调研报告切换时只读取当前报告的选图，所有带入按钮共用同一组选图。
+  const references = gallerySelection?.reportKey === galleryKey ? gallerySelection.references : {}
+  const referenceCount = Object.keys(references).length
+  const briefButtonLabel = referenceCount ? `带入需求和 ${referenceCount} 张参考图` : '仅带入文字需求'
+  const galleryReferences = galleryProduct && <AmazonGalleryReferences
+    key={galleryKey}
+    images={galleryProduct.gallery_image_urls?.length
+      ? galleryProduct.gallery_image_urls
+      : [...(productOverview?.images.map((image) => image.url) ?? []), galleryProduct.image_url]}
+    busy={loading} references={references}
+    onChange={(next) => setGallerySelection({ reportKey: galleryKey, references: next })}
+    onCreate={() => sendBrief()}
+  />
   const storeUrl = product?.store_url
   const listingGroups = report ? groupAmazonListings(report.listings, report.mode) : []
   const productArchive = run?.snapshot.product_archive
 
   return (
     <div className="mx-auto max-w-[1180px] space-y-6">
-      <header className="border-b pb-4">
-        <h1 className="text-2xl font-semibold tracking-tight">亚马逊调研</h1>
-        <p className="mt-1 text-sm text-muted-foreground">调研 Amazon 美国站公开页面，查找可用于选品和图片制作的线索。</p>
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 border-b pb-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">亚马逊调研</h1>
+          <p className="mt-1 text-sm text-muted-foreground">调研 Amazon 美国站公开页面，查找可用于选品和图片制作的线索。</p>
+        </div>
+        <Button asChild variant="outline">
+          <a href="https://www.amazon.com/" target="_blank" rel="noopener noreferrer" aria-label="打开 Amazon 美国站（新标签页）">
+            打开 Amazon 美国站 <ExternalLink aria-hidden="true" />
+          </a>
+        </Button>
       </header>
 
       {/* 关闭表单自动补全，避免历史商品或店铺链接弹层遮挡报告。 */}
@@ -621,7 +647,8 @@ export default function ResearchPage() {
       {run && <AmazonRunDetails key={run.id} run={run} busy={loading} pollError={pollError} onRetry={(target, key) => void retryRun(target, key)} />}
       {run && <AmazonResearchWorkspace run={run} busy={loading} onOpen={(id) => void openRun(id)} onRetryTranslation={() => void retryRun('translation')} />}
 
-      {run?.mode === 'product' && <AmazonProductReport key={run.id} run={run} onBrief={sendBrief} onStore={(url) => openRelated('store', url)} />}
+      {run?.mode === 'product' && galleryReferences}
+      {run?.mode === 'product' && <AmazonProductReport key={run.id} run={run} onBrief={sendBrief} briefButtonLabel={briefButtonLabel} onStore={(url) => openRelated('store', url)} />}
       {run?.mode === 'bestsellers' && <AmazonCategoryReport run={run} busy={loading} onProduct={(url, asin, direction) => openRelated('product', url, asin, direction)} onStore={(asin, direction) => void openCategoryStore(asin, direction)} />}
       {run?.mode === 'store' && run.snapshot.product_matrix && <AmazonStoreProductMatrix key={'matrix-' + run.id} run={run} matrix={run.snapshot.product_matrix} onOpen={(id) => void openRun(id)} />}
       {run?.snapshot.competition && !activeAmazonRun(run) && <AmazonStoreBenchmarks competition={run.snapshot.competition} />}
@@ -713,10 +740,14 @@ export default function ResearchPage() {
                   </details>
                 </section>
               )}
+              {galleryReferences}
               <section className="space-y-3 rounded-lg border border-primary/25 bg-card p-4">
                 <Label htmlFor="image-brief" className="text-base font-medium">图片制作需求</Label>
                 <Textarea id="image-brief" className="min-h-32" maxLength={AMAZON_BRIEF_LIMIT} value={brief} onChange={(event) => setBrief(event.target.value)} />
-                <Button disabled={loading || !brief.trim()} onClick={() => sendBrief()}>带入图片创作 <ArrowRight aria-hidden="true" /></Button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button disabled={loading || (!brief.trim() && !referenceCount)} onClick={() => sendBrief()}>{briefButtonLabel} <ArrowRight aria-hidden="true" /></Button>
+                  {!referenceCount && <a href="#amazon-image-references" className="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground">先选择参考图</a>}
+                </div>
               </section>
             </>
           )}

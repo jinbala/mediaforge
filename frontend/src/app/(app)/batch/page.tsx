@@ -17,6 +17,7 @@ import {
 
 import { api, ApiError } from '@/lib/api'
 import { AMAZON_BRIEF_KEY, AMAZON_BRIEF_LIMIT, AMAZON_BRIEF_PARAM } from '@/lib/amazon-research'
+import { AMAZON_IMAGE_ROLES, amazonImageRoles, cleanAmazonImageReferences } from '@/lib/amazon-image-references'
 import { inferMarketFromPlatforms } from '@/lib/sku-options'
 import { useModels } from '@/hooks/useModels'
 import { SkuForm, type Sku } from '@/components/SkuForm'
@@ -94,6 +95,10 @@ function getSkuIssues(sku: Sku): string[] {
 function toSkuInput(draft: GenerationDraft): SkuInput {
   const { sku } = draft
   const targetPlatforms = sku.target_platforms.split(',').map((value) => value.trim()).filter(Boolean)
+  const references = targetPlatforms.includes('amazon') ? cleanAmazonImageReferences(sku.amazon_image_references) : {}
+  for (const role of amazonImageRoles) {
+    if (!sku.output_types.includes(AMAZON_IMAGE_ROLES[role].output)) delete references[role]
+  }
   return {
     sku_id: sku.sku_id.trim(),
     product_image_url: sku.product_image_url.trim(),
@@ -102,6 +107,7 @@ function toSkuInput(draft: GenerationDraft): SkuInput {
     target_platforms: targetPlatforms,
     output_types: sku.output_types,
     style_hint: sku.style_hint.trim() || null,
+    amazon_image_references: references,
     presentation_mode: sku.presentation_mode,
     model_preference: sku.model_preference,
     market: inferMarketFromPlatforms(targetPlatforms),
@@ -140,16 +146,22 @@ export default function BatchPage() {
       // 只有地址栏 ID 和标签页中暂存的 ID 匹配时，才带入对应的需求。
       try {
         const saved = JSON.parse(window.sessionStorage.getItem(AMAZON_BRIEF_KEY) ?? 'null')
-        if (saved?.id === amazonBriefId && typeof saved.brief === 'string' && saved.brief.trim()) {
+        const savedBrief = typeof saved?.brief === 'string' ? saved.brief.trim().slice(0, AMAZON_BRIEF_LIMIT) : ''
+        const references = cleanAmazonImageReferences(saved?.references)
+        const count = Object.keys(references).length
+        if (saved?.id === amazonBriefId && (savedBrief || count)) {
           // 用空白 SKU 预填 Amazon 平台和图片类型，用户继续上传自有原图并填写 SKU。
           setSku({
             ...createSku(),
             target_platforms: 'amazon',
             market: inferMarketFromPlatforms(['amazon']),
             output_types: ['main_image', 'detail_page'],
-            style_hint: saved.brief.slice(0, AMAZON_BRIEF_LIMIT),
+            style_hint: savedBrief,
+            amazon_image_references: references,
           })
-          setSuccess('已带入亚马逊图片需求。请上传自己的商品原图并填写 SKU。')
+          setSuccess(count
+            ? `已带入 ${count} 张亚马逊参考图。请上传自己的商品原图并填写 SKU。`
+            : '已带入亚马逊文字需求，参考图 0 张。')
           return
         }
       } catch {
@@ -163,6 +175,7 @@ export default function BatchPage() {
         const input = job.input_data
         const first = input?.skus?.[0]
         if (!input || !first) return
+        const references = cleanAmazonImageReferences(first.amazon_image_references)
         setSku({
           sku_id: first.sku_id,
           product_image_url: first.product_image_url,
@@ -171,6 +184,7 @@ export default function BatchPage() {
           target_platforms: first.target_platforms.join(', '),
           output_types: first.output_types,
           style_hint: first.style_hint || '',
+          amazon_image_references: Object.keys(references).length ? references : undefined,
           presentation_mode: first.presentation_mode,
           model_preference: first.model_preference,
           market: first.market,
@@ -368,6 +382,12 @@ export default function BatchPage() {
     )
   }
 
+  const amazonReferenceCount = Object.keys(cleanAmazonImageReferences(sku.amazon_image_references)).length
+  const referenceSummary = amazonReferenceCount
+    ? `Amazon 参考图 ${amazonReferenceCount} 张`
+    : sku.amazon_image_references !== undefined ? 'Amazon 参考图 0 张'
+      : sku.reference_mode === 'specified' ? sku.ref_sku_id || '等待选择' : sku.reference_mode === 'none' ? '不使用参考' : '自动匹配'
+
   return (
     <div className="mx-auto flex h-full max-w-[1480px] flex-col gap-2 overflow-hidden">
       <header className="flex shrink-0 items-center gap-3 border-b pb-2">
@@ -390,7 +410,7 @@ export default function BatchPage() {
       )}
 
       <div className="min-h-0 flex-1">
-        <main className="min-h-0 min-w-0">
+        <main className="h-full min-h-0 min-w-0">
           <section className="flex h-full flex-col overflow-hidden rounded-xl border bg-card">
             <div className="flex shrink-0 flex-wrap items-center gap-3 border-b bg-muted/20 px-3 py-2">
               <div className="mr-auto min-w-0">
@@ -401,7 +421,7 @@ export default function BatchPage() {
             </div>
 
             <div className="grid shrink-0 grid-cols-[1fr_auto_1fr_auto_1fr] items-center gap-2 border-b bg-muted/10 px-3 py-2 text-xs">
-              <div className="min-w-0"><p className="font-medium">新品原图</p><p className="truncate text-muted-foreground">{sku.sku_id || '等待上传或选择'}</p></div><ChevronRight className="h-4 w-4 text-muted-foreground" /><div className="min-w-0"><p className="font-medium">爆款参考</p><p className="truncate text-muted-foreground">{sku.reference_mode === 'specified' ? sku.ref_sku_id || '等待选择' : sku.reference_mode === 'none' ? '不使用参考' : '自动匹配'}</p></div><ChevronRight className="h-4 w-4 text-muted-foreground" /><div className="min-w-0"><p className="font-medium">生成结果</p><p className="truncate text-muted-foreground">{currentEstimate} 张 · {sku.target_platforms || '未选平台'}</p></div>
+              <div className="min-w-0"><p className="font-medium">新品原图</p><p className="truncate text-muted-foreground">{sku.sku_id || '等待上传或选择'}</p></div><ChevronRight className="h-4 w-4 text-muted-foreground" /><div className="min-w-0"><p className="font-medium">生成参考</p><p className="truncate text-muted-foreground">{referenceSummary}</p></div><ChevronRight className="h-4 w-4 text-muted-foreground" /><div className="min-w-0"><p className="font-medium">生成结果</p><p className="truncate text-muted-foreground">{currentEstimate} 张 · {sku.target_platforms || '未选平台'}</p></div>
             </div>
 
             <div className="grid shrink-0 gap-2 border-b bg-muted/[0.06] p-2 sm:grid-cols-2 xl:grid-cols-4">
@@ -411,7 +431,7 @@ export default function BatchPage() {
               <div className="space-y-1"><Label>任务优先级</Label><Select value={priority} onValueChange={(value) => setPriority(value as Priority)}><SelectTrigger className="h-9"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">低</SelectItem><SelectItem value="normal">普通</SelectItem><SelectItem value="high">高</SelectItem></SelectContent></Select></div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-hidden p-2">
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
               <SkuForm sku={sku} index={0} canRemove={false} onChange={setSku} onRemove={() => undefined} embedded showGenerationSettings singleScreen />
             </div>
 

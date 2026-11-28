@@ -57,6 +57,7 @@ class AmazonProduct(AmazonListing):
     reviews: list[AmazonReview] = Field(default_factory=list)
     review_topics: list[AmazonReviewTopic] = Field(default_factory=list)
     image_brief: str
+    gallery_image_urls: list[str] = Field(default_factory=list)
     description: str | None = None
     category_path: list[str] | None = None
     first_available: str | None = None

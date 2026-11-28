@@ -27,6 +27,7 @@ export type AmazonListing = {
 }
 
 export type AmazonProduct = AmazonListing & {
+  gallery_image_urls?: string[]
   brand: string | null
   store_url: string | null
   category: string | null

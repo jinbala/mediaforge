@@ -198,13 +198,13 @@ function FinanceOverview({ analysis }: { analysis: ProductAnalysis }) {
   </div>
 }
 
-type ProductReportProps = { run: AmazonRun; onBrief: (text: string) => void; onStore?: (url: string) => void }
+type ProductReportProps = { run: AmazonRun; onBrief: (text: string) => void; briefButtonLabel: string; onStore?: (url: string) => void }
 
 export function AmazonProductReport(props: ProductReportProps) {
   return <ProductReport key={props.run.id} {...props} />
 }
 
-function ProductReport({ run, onBrief, onStore }: ProductReportProps) {
+function ProductReport({ run, onBrief, briefButtonLabel, onStore }: ProductReportProps) {
   const depth: ProductDepth | null = run.snapshot.product_depth ?? null
   const analysis = depth?.analysis ?? null
   const sectionsByReq = new Map((analysis?.sections ?? []).map((section) => [section.req, section]))
@@ -240,7 +240,7 @@ function ProductReport({ run, onBrief, onStore }: ProductReportProps) {
     </li>)}</ul> : <p className="text-sm text-muted-foreground">尚无图片或视频方案。</p>}
     <label className="block space-y-1 text-sm"><span>已选方案文案（可编辑后带入图片创作）</span><Textarea className="min-h-28" maxLength={AMAZON_BRIEF_LIMIT} value={shotCopy} onChange={(event) => setShotCopy(event.target.value)} /></label>
     {shotCopy.length > AMAZON_BRIEF_LIMIT && <p className="text-sm text-muted-foreground">请将方案文案缩短至 {AMAZON_BRIEF_LIMIT} 字符以内。</p>}
-    <Button type="button" disabled={!shotCopy.trim() || shotCopy.length > AMAZON_BRIEF_LIMIT} onClick={() => onBrief(shotCopy.trim())}>带入图片创作</Button>
+    <Button type="button" disabled={!shotCopy.trim() || shotCopy.length > AMAZON_BRIEF_LIMIT} onClick={() => onBrief(shotCopy.trim())}>{briefButtonLabel}</Button>
   </section>
 
   const listingEditor = template && <section className="space-y-3 border-t pt-4" aria-label="Listing 文案模板">

@@ -375,7 +375,7 @@ class OpenRouterClient:
         size: str = "2K",
         aspect_ratio: str = "1:1",
         product_image_path: str | None = None,
-        ref_image_path: str | None = None,
+        ref_image_path: str | bytes | None = None,
     ) -> dict:
         full_model = self.model_name(model)
         provider = self.image_provider if self.image_provider and model == self.image_provider.model_alias else None
@@ -440,7 +440,7 @@ class OpenRouterClient:
         size: str = "2K",
         aspect_ratio: str = "1:1",
         product_image_path: str | None = None,
-        ref_image_path: str | None = None,
+        ref_image_path: str | bytes | None = None,
     ) -> bytes:
         full_model = get_image_models()[model]
         sem = _get_image_semaphores()[full_model]

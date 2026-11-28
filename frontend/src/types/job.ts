@@ -9,6 +9,8 @@ export type ImageSize = '1K' | '2K' | '4K'
 export type ReferenceMode = 'auto' | 'specified' | 'none'
 export type PresentationMode = 'auto' | 'model_wear' | 'product_only'
 export type ModelPreference = 'auto' | 'female' | 'male' | 'no_face'
+export type AmazonImageRole = 'main' | 'scene' | 'feature' | 'closeup'
+export type AmazonImageReferences = Partial<Record<AmazonImageRole, { image_url: string; direction: string }>>
 
 export type Job = {
   job_id: string
@@ -27,6 +29,7 @@ export type SkuInput = {
   target_platforms: string[]
   output_types: OutputType[]
   style_hint: string | null
+  amazon_image_references?: AmazonImageReferences
   presentation_mode: PresentationMode
   model_preference: ModelPreference
   market: string
