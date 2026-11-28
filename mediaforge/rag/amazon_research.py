@@ -2,7 +2,8 @@ import asyncio
 import json
 import re
 from datetime import UTC, datetime
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
+from typing import Literal
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -79,7 +80,7 @@ class AmazonFetchError(Exception):
         self.url = url
 
 
-def normalize_source(mode: ResearchMode, source: str) -> str:
+def normalize_source(mode: ResearchMode | Literal["search"], source: str) -> str:
     # 按调研类型验证美国站地址并重建链接，去掉追踪参数，只保留榜单第二页参数。
     value = source.strip()
     if mode == "product" and ASIN.fullmatch(value):
@@ -103,6 +104,10 @@ def normalize_source(mode: ResearchMode, source: str) -> str:
         if mode == "bestsellers" and BESTSELLERS_PATH.fullmatch(path):
             page = parse_qs(parsed.query).get("pg", ["1"])[0]
             return f"{AMAZON}{path}" + ("?pg=2" if page == "2" else "")
+        if mode == "search" and path == "/s":
+            query = parse_qs(parsed.query).get("k", [""])[0].strip()
+            if query and len(query) <= 100 and not any(ord(char) < 32 for char in query):
+                return f"{AMAZON}/s?{urlencode({'k': query})}"
         if mode == "store" and STORE_PATH.fullmatch(path):
             return f"{AMAZON}{quote(path, safe='/')}"
     except ValueError:
@@ -112,6 +117,7 @@ def normalize_source(mode: ResearchMode, source: str) -> str:
         "product": "请输入 Amazon 美国站商品链接或 10 位 ASIN。",
         "bestsellers": "请输入 Amazon 美国站 Best Sellers 榜单链接。",
         "store": "请输入 Amazon 美国站品牌店铺链接，地址中应包含 /stores/ 和 /page/。",
+        "search": "Amazon 美国站搜索词无效。",
     }
     raise AmazonSourceError(message[mode])
 
@@ -574,7 +580,7 @@ async def _read_body(response: httpx.Response, limit: int) -> bytes:
 
 
 async def _fetch_page(
-    client: httpx.AsyncClient, mode: ResearchMode, url: str
+    client: httpx.AsyncClient, mode: ResearchMode | Literal["search"], url: str
 ) -> tuple[str, bytes]:
     try:
         async with asyncio.timeout(16):

@@ -155,6 +155,7 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
   const matrix = run?.snapshot.product_matrix
   if (matrix && run) lines.push(...formatAmazonProductMatrix(run, matrix, escape))
   if (run?.snapshot.lifecycle) lines.push(...formatAmazonLifecycle(run.snapshot.lifecycle, escape))
+  if (run?.snapshot.competition) lines.push(...formatAmazonCompetition(run.snapshot.competition, escape))
   const archive = run?.snapshot.product_archive
   if (archive) {
     lines.push('', '### 商品归档', '', ...amazonArchiveCounts(archive).map(([label, count]) => '- ' + label + ' · ' + count))
@@ -298,6 +299,47 @@ export type AmazonStoreLifecycle = {
   } | null
 }
 
+export type AmazonMarketListing = {
+  asin: string
+  url: string
+  collected_at: string
+  title: string | null
+  brand: string | null
+  store_url: string | null
+  category: string | null
+  price: string | null
+  price_currency: string | null
+  rating: string | null
+  rating_count: string | null
+  highlights: string[]
+  image_count: number | null
+  has_aplus: boolean | null
+  problem: string | null
+}
+
+export type AmazonStoreCompetition = {
+  targets: string[]
+  searches: {
+    target_asin: string
+    query: string
+    url: string
+    collected_at: string
+    status: 'success' | 'empty' | 'failed'
+    candidates: { asin: string; title: string }[]
+    problem: string | null
+  }[]
+  listings: Record<string, AmazonMarketListing>
+  pairs: {
+    target_asin: string
+    competitor_asin: string
+    shared_terms: string[]
+    shared_category: string | null
+    audience: string | null
+    price_gap_cents: number | null
+    swot: Record<string, string>
+  }[]
+}
+
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
   inputs: { source: string; keyword: string; category?: CategoryInputs | null }
@@ -324,6 +366,7 @@ export type AmazonRun = AmazonRunSummary & {
     product_archive?: AmazonStoreArchive | null
     product_matrix?: AmazonStoreProductMatrix | null
     lifecycle?: AmazonStoreLifecycle | null
+    competition?: AmazonStoreCompetition | null
   }
 }
 
@@ -498,5 +541,48 @@ function formatAmazonLifecycle(lifecycle: AmazonStoreLifecycle, escape: (text: s
       ...change.series_changes.map((item) => `- 规格组 ${item.family_asin} · 新观察 ${item.newly_seen.join('、') || '无'} · 未再观察 ${item.no_longer_seen.join('、') || '无'}`),
       ...(!change.series_changes.length ? ['共同可核实的系列未观察到变化。'] : []),
     ] : ['当前没有同一店铺、同一栏目可比的历史采样。']),
+  ]
+}
+
+export const amazonBenchmarkScope = '对标仅涵盖公开搜索及入选商品详情。完整店铺款式、市场平均评分和实际搜索量未知。'
+
+export function amazonBenchmarkBasis(pair: AmazonStoreCompetition['pairs'][number]) {
+  const category = pair.shared_category ? '同末级类目 ' + pair.shared_category : '末级类目待核对'
+  return category + ' · 共同标题用词 ' + pair.shared_terms.join('、')
+}
+
+export function amazonBenchmarkCoverage(competition: AmazonStoreCompetition) {
+  const peers = [...new Set(competition.pairs.map((pair) => pair.competitor_asin))].map((asin) => competition.listings[asin])
+  const brands = new Set(peers.map((item) => item.brand).filter(Boolean)).size
+  const categories = new Set(peers.map((item) => item.category).filter(Boolean)).size
+  const ratings = peers.flatMap((item) => item.rating && /^\d(?:\.\d+)?$/.test(item.rating) ? [Number(item.rating)] : [])
+  const range = ratings.length ? `${Math.min(...ratings)}–${Math.max(...ratings)} / 5（n=${ratings.length}）` : '未知'
+  return `对标样本 ${peers.length} 个 ASIN、${brands} 个品牌、${categories} 个已见末级类目。对标评分范围 ${range}。`
+}
+
+export function amazonListingPresentation(item: AmazonMarketListing) {
+  return `图组 ${item.image_count ?? '未知'} 张 · A+ ${item.has_aplus == null ? '未知' : item.has_aplus ? '已观察' : '未见内容'}`
+}
+
+function formatAmazonCompetition(competition: AmazonStoreCompetition, escape: (value: string) => string) {
+  return [
+    '', '### 竞品与品牌定位', '', amazonBenchmarkScope, amazonBenchmarkCoverage(competition),
+    ...competition.searches.map((search) => `- [${escape(search.query)}](${search.url}) · ${search.candidates.length} 张候选卡片 · ${amazonTime(search.collected_at)}${search.problem ? ' · ' + escape(search.problem) : ''}`),
+    ...Object.values(competition.listings).filter((item) => item.problem).map((item) => `- [${item.asin}](${item.url}) · ${escape(item.problem ?? '')} · ${amazonTime(item.collected_at)}`),
+    ...(competition.pairs.length ? competition.pairs.flatMap((pair) => {
+      const items = [competition.listings[pair.target_asin], competition.listings[pair.competitor_asin]]
+      return [
+        '', `#### ${items.map((item) => escape(item.brand ?? '未知') + ' ' + item.asin).join(' / ')}`,
+        escape(amazonBenchmarkBasis(pair)),
+        `受众依据 ${pair.audience ?? '待验证'}。标价差（目标款减竞品）${pair.price_gap_cents === null ? '未知' : 'USD ' + (pair.price_gap_cents / 100).toFixed(2)}。`,
+        ...items.flatMap((item) => [
+          `- [${escape(item.title ?? item.asin)}](${item.url}) · 采集 ${amazonTime(item.collected_at)}`,
+          `  - 价 ${escape(item.price ?? '未知')} ${item.price_currency ?? ''} · 评分 ${item.rating ?? '未知'} · 评分数 ${item.rating_count ?? '未知'} · ${amazonListingPresentation(item)}`,
+          `  - 公开卖点 ${escape(item.highlights[0]?.slice(0, 150) ?? '未知')}`,
+          item.store_url ? `  - [品牌店铺](${item.store_url})` : '  - 公开店铺链接未知。',
+        ]),
+        ...Object.entries(pair.swot).map(([label, text]) => `- ${label}（基于上面两个 ASIN）· ${escape(text)}`),
+      ]
+    }) : ['当前无可复核的对标配对。']),
   ]
 }

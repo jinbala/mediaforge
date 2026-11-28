@@ -148,6 +148,56 @@ class AmazonStoreLifecycle(BaseModel):
     change: AmazonStoreChange | None = None
 
 
+class AmazonMarketListing(BaseModel):
+    asin: str
+    url: str
+    collected_at: datetime
+    title: str | None = None
+    brand: str | None = None
+    store_url: str | None = None
+    category: str | None = None
+    price: str | None = None
+    price_currency: str | None = None
+    rating: str | None = None
+    rating_count: str | None = None
+    highlights: list[str] = Field(default_factory=list)
+    image_count: int | None = None
+    has_aplus: bool | None = None
+    problem: str | None = None
+
+
+class AmazonBenchmarkCandidate(BaseModel):
+    asin: str
+    title: str
+
+
+class AmazonBenchmarkSearch(BaseModel):
+    target_asin: str
+    query: str
+    url: str
+    collected_at: datetime
+    status: Literal["success", "empty", "failed"]
+    candidates: list[AmazonBenchmarkCandidate] = Field(default_factory=list)
+    problem: str | None = None
+
+
+class AmazonBenchmarkPair(BaseModel):
+    target_asin: str
+    competitor_asin: str
+    shared_terms: list[str]
+    shared_category: str | None = None
+    audience: str | None = None
+    price_gap_cents: int | None = None
+    swot: dict[str, str]
+
+
+class AmazonStoreCompetition(BaseModel):
+    targets: list[str]
+    searches: list[AmazonBenchmarkSearch] = Field(default_factory=list)
+    listings: dict[str, AmazonMarketListing] = Field(default_factory=dict)
+    pairs: list[AmazonBenchmarkPair] = Field(default_factory=list)
+
+
 class AmazonEvidence(BaseModel):
     key: str
     kind: Literal["section", "suggestions", "board", "analysis"]
@@ -185,6 +235,7 @@ class AmazonResearchSnapshot(BaseModel):
     product_archive: AmazonStoreArchive | None = None
     product_matrix: AmazonStoreProductMatrix | None = None
     lifecycle: AmazonStoreLifecycle | None = None
+    competition: AmazonStoreCompetition | None = None
     translation_status: StepStatus = "pending"
     translation_missing: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

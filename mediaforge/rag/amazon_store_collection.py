@@ -3,26 +3,31 @@ import re
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Literal
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import unquote, urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
 
 from mediaforge.models.amazon_research import AmazonStoreVariant
 from mediaforge.models.amazon_research_run import (
+    AmazonBenchmarkCandidate,
+    AmazonBenchmarkSearch,
     AmazonEvidence,
     AmazonListingDate,
+    AmazonMarketListing,
     AmazonStoreSample,
     AmazonStoreSampleScope,
 )
 from mediaforge.rag.amazon_research import (
     AMAZON,
+    ASIN,
     AmazonFetchError,
     AmazonSourceError,
     _fetch_page,
     _first_text,
     _linked_source,
     _parse_listings,
+    _parse_report,
     _rating,
     _store_pages,
     _store_product_cards,
@@ -481,3 +486,89 @@ async def collect_listing_date(client: httpx.AsyncClient, asin: str) -> AmazonLi
     except AmazonFetchError as exc:
         item.problem = str(exc)
     return item
+
+
+BENCHMARK_CANDIDATE_LIMIT = 16
+
+
+def _benchmark_cards(html: bytes) -> list[AmazonBenchmarkCandidate]:
+    soup = BeautifulSoup(html, "html.parser", from_encoding="utf-8")
+    if soup.select_one('form[action*="validateCaptcha"], #captchacharacters'):
+        raise AmazonFetchError("Amazon 搜索返回访问验证。", "captcha")
+    results = {}
+    for card in soup.select('[data-component-type="s-search-result"][data-asin]'):
+        asin = str(card.get("data-asin", "")).upper()
+        if not ASIN.fullmatch(asin) or asin in results:
+            continue
+        # 排除在当前 HTML 中明确标记为赞助的结果，保留余下卡片的公开顺序。
+        if card.select_one(
+            '[aria-label="Sponsored"], .puis-sponsored-label-text, '
+            '[data-component-type*="sp-sponsored"], .s-sponsored-label-info-icon'
+        ):
+            continue
+        link = card.select_one("h2 a[href], a[href]:has(h2)")
+        title = _first_text(card, "h2")
+        if not link or not title:
+            continue
+        if (url := _linked_source("product", link)) and url.endswith("/" + asin):
+            results[asin] = AmazonBenchmarkCandidate(asin=asin, title=title)
+        if len(results) >= BENCHMARK_CANDIDATE_LIMIT:
+            break
+    return list(results.values())
+
+
+async def collect_benchmark_search(
+    client: httpx.AsyncClient,
+    asin: str,
+    query: str,
+) -> AmazonBenchmarkSearch:
+    url = normalize_source("search", f"{AMAZON}/s?{urlencode({'k': query})}")
+    collected_at = datetime.now(UTC)
+    try:
+        final, html = await _fetch_page(client, "search", url)
+        if final != url:
+            raise AmazonFetchError("Amazon 搜索跳转到不同查询词，未使用其结果。", "redirect")
+        results = await asyncio.to_thread(_benchmark_cards, html)
+        return AmazonBenchmarkSearch(
+            target_asin=asin,
+            query=query,
+            url=url,
+            collected_at=collected_at,
+            status="success" if results else "empty",
+            candidates=results,
+            problem=None if results else "公开 HTML 未见可读取的非赞助结果卡片。",
+        )
+    except AmazonFetchError as exc:
+        return AmazonBenchmarkSearch(
+            target_asin=asin,
+            query=query,
+            url=url,
+            collected_at=collected_at,
+            status="failed",
+            problem=str(exc),
+        )
+
+
+async def collect_benchmark_listing(client: httpx.AsyncClient, asin: str) -> AmazonMarketListing:
+    url = normalize_source("product", asin)
+    collected_at = datetime.now(UTC)
+    try:
+        final, html = await _fetch_page(client, "product", url)
+        if final != url:
+            raise AmazonFetchError("商品页面跳转到不同 ASIN，未将其归入对标。", "redirect")
+        report = await asyncio.to_thread(_parse_report, "product", final, html, "")
+        product = report.product
+        assert product is not None
+        details = product.model_dump(
+            include=set(AmazonMarketListing.model_fields)
+            - {"url", "asin", "collected_at", "price_currency", "problem"}
+        )
+        return AmazonMarketListing(
+            asin=asin,
+            url=final,
+            collected_at=report.collected_at,
+            price_currency=_currency(product.price),
+            **details,
+        )
+    except AmazonFetchError as exc:
+        return AmazonMarketListing(asin=asin, url=url, collected_at=collected_at, problem=str(exc))

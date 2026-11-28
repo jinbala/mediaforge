@@ -2,6 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 import httpx
@@ -607,3 +608,78 @@ async def test_store_lifecycle_compares_same_owner_snapshots_and_keeps_observati
     assert other["snapshot"]["lifecycle"]["change"] is None
     assert other["snapshot"]["lifecycle"]["dates"] == []
     assert len(release.calls) == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("search_available", [True, False])
+async def test_store_benchmark_uses_public_search_and_records_comparison_sources(
+    api, search_available
+):
+    client, _, _, _, _ = api
+    target, rival, ad = IDS
+    title = "Fixture Women's Long Sleeve Ribbed Cotton T-Shirt"
+    card = {
+        "asin": target,
+        "detailPageLinkURL": f"/dp/{target}",
+        "title": {"displayString": title},
+        "productCategory": {"productType": "SHIRT"},
+        "byLine": {"contributors": [{"roles": [{"type": "BRAND"}], "name": "Fixture"}]},
+    }
+    respx.get(INITIAL).respond(
+        200,
+        text=(
+            f'<a href="/dp/{target}">{title}</a>'
+            f'<script>{json.dumps({"products": [card]})}</script>'
+        ),
+    )
+
+    def details(brand, price, store_url):
+        return f'''
+        <span id="productTitle">{brand} Women's Long Sleeve Ribbed Cotton T-Shirt</span>
+        <a id="bylineInfo" href="{store_url}">Visit the {brand} Store</a>
+        <div id="wayfinding-breadcrumbs_feature_div"><ul><li><a>T-Shirts</a></li></ul></div>
+        <div id="corePrice_feature_div"><span class="a-price">
+          <span class="a-offscreen">{price}</span></span></div>
+        <span id="acrPopover" title="4.3 out of 5 stars"></span>
+        <span id="acrCustomerReviewText">126 ratings</span>
+        <div id="feature-bullets"><ul><li>
+          <span class="a-list-item">Ribbed cotton</span></li></ul></div>
+        '''
+
+    rival_store = f"{AMAZON}/stores/Rival/page/66666666-6666-6666-6666-666666666666"
+    respx.get(f"{AMAZON}/dp/{target}").respond(200, text=details("Fixture", "$20.99", INITIAL))
+    respx.get(f"{AMAZON}/dp/{rival}").respond(200, text=details("Rival", "$25.99", rival_store))
+    lookup = f"{AMAZON}/s?" + urlencode({"k": "women's long sleeve T-Shirts"})
+    search = respx.get(lookup).respond(
+        200,
+        text=f'''
+        <div data-component-type="s-search-result" data-asin="{ad}">
+          <span aria-label="Sponsored"></span>
+          <a href="/dp/{ad}"><h2>Ad Women's Ribbed Cotton Long Sleeve Shirt</h2></a>
+        </div>
+        <div data-component-type="s-search-result" data-asin="{rival}">
+          <a href="/dp/{rival}"><h2>Rival Women's Ribbed Cotton Long Sleeve Shirt</h2></a>
+        </div>''',
+    )
+    if not search_available:
+        search.respond(503)
+    request = await client.post(API, json={"mode": "store", "source": INITIAL})
+    result = await _run_submitted(client, request.json()["id"])
+    report = result["snapshot"]["competition"]
+    if not search_available:
+        assert result["status"] == "partial_fail"
+        assert result["report"]["listings"][0]["asin"] == target
+        assert report["searches"][0]["status"] == "failed"
+        assert report["pairs"] == []
+        return
+
+    assert [item["asin"] for item in report["searches"][0]["candidates"]] == [rival]
+    assert report["searches"][0]["url"] == lookup
+    assert report["listings"][rival]["store_url"] == rival_store
+    assert report["listings"][rival]["rating_count"] == "126"
+    assert report["listings"][rival]["highlights"] == ["Ribbed cotton"]
+    assert report["pairs"][0]["price_gap_cents"] == -500
+    assert report["pairs"][0]["shared_category"] == "T-Shirts"
+    assert "sleeve" in report["pairs"][0]["shared_terms"]
+    assert report["pairs"][0]["audience"] == "女性款标记"
+    assert "较低" in report["pairs"][0]["swot"]["优势"]

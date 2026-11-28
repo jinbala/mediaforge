@@ -9,7 +9,7 @@
 | 表格导入 | 「爆款商品库 → 导入商品」上传 CSV 或 Excel，匹配商品图片后导入，保存商品信息、图片和检索索引。 | [导入与检索 API](../mediaforge/gateway/routers/rag.py) · [导入测试](../tests/test_product_import.py) |
 | 商品链接导入与多图浏览 | 在商品库粘贴拼多多、抖音商城或 17 网分享内容。预览可切换已读取的图片，导入时首图作为封面，其余图片保留在商品相册。读取失败时可重新读取，符合条件时可手动上传。 | [链接导入](../frontend/src/components/ProductLinkImport.tsx) · [商品相册](../frontend/src/components/ProductPhotoGallery.tsx) · [本机浏览器助手](../frontend/product-browser/) · [多图导入测试](../tests/test_product_import.py) |
 | 商品可见性管理 | 在商品库隐藏本企业的公共参考条目，可在「已隐藏」恢复。企业私有商品提供删除操作。 | [商品 API](../mediaforge/gateway/routers/products.py) · [隐藏、恢复和删除测试](../tests/test_product_delete.py) |
-| 亚马逊调研 | 从工作台或侧栏打开「亚马逊调研」。单品沿用单页查询，类目和店铺通过任务采集。品牌店铺提交一个美国站链接即可识别首页并逐页采集，查看来源、状态、产品组合、价格带、归档和新品样本变化，展开同配色尺码。可下载带采样范围的逐栏目快照，从「历史记录」恢复或重试失败项。 | [调研页面](<../frontend/src/app/(app)/research/page.tsx>) · [任务 API](../mediaforge/gateway/routers/amazon_research.py) · [店铺编排](../mediaforge/orchestrator/amazon_research.py) · [栏目采集](../mediaforge/rag/amazon_store_collection.py) · [采集与恢复测试](../tests/test_amazon_store_depth.py)。按[调研流程](#亚马逊调研)复核 REQ-001。 |
+| 亚马逊调研 | 从工作台或侧栏打开「亚马逊调研」。单品沿用单页查询，类目和店铺通过任务采集。品牌店铺提交一个美国站链接即可识别首页并逐页采集，查看来源、状态、产品组合、价格带、归档、新品样本变化与公开竞品，展开同配色尺码。可下载带采样范围的逐栏目快照，从「历史记录」恢复或重试失败项。 | [调研页面](<../frontend/src/app/(app)/research/page.tsx>) · [任务 API](../mediaforge/gateway/routers/amazon_research.py) · [店铺编排](../mediaforge/orchestrator/amazon_research.py) · [栏目采集](../mediaforge/rag/amazon_store_collection.py) · [采集与恢复测试](../tests/test_amazon_store_depth.py)。按[调研流程](#亚马逊调研)复核 REQ-001。 |
 | 亚马逊调研工具（REQ-039–044） | 在「亚马逊调研 → 调研工具」运行关键词、Listing、PPC、FBA、到岸成本或 HS 查询。查看来源和缺项，下载 JSON 或从当前浏览器的「工具历史」恢复。 | [工具面板](../frontend/src/components/research/AmazonScriptTools.tsx) · [接口模型](../mediaforge/models/amazon_script_tools.py) · [验收步骤](#调研工具req-039044) · [固定样本测试](../tests/test_amazon_script_tools.py) |
 | 类目深调研（REQ-012–020） | 「亚马逊调研 → 类目榜单」，自动发现子榜，可指定子榜与成本；在历史恢复报告并下载逐榜证据。 | [类目编排](../mediaforge/orchestrator/amazon_category.py) · [类目采集](../mediaforge/rag/amazon_category_collection.py) · [分析规则](../mediaforge/rag/amazon_category_analysis.py) · [固定样本](../tests/test_amazon_category_depth.py) |
 | 亚马逊运营技能（REQ-045–095） | 「亚马逊调研 → 运营技能」，分组选择编号，填写事实、假设或授权报表汇总，生成和下载报告。 | [技能面板](../frontend/src/components/research/AmazonSkills.tsx) · [目录与分发](../mediaforge/workers/amazon_skills.py) · [基础技能](#亚马逊运营技能req-045060) · [进阶技能](#进阶运营技能req-061095) |
@@ -55,6 +55,10 @@ REQ-003 复核时任选一组已采尺码，打开其 ASIN 来源，核对公开
 **新品节奏与产品线（REQ-005）。** 打开「产品组合与价格带」中的「公开评分数领先款与新品」查看当次新品栏目及样本，再展开「新品节奏与产品线」。颜色和尺码按去重 ASIN 计数，规格缺项单列。前后两次均成功读取或为空页的同栏目才比较，从同一企业、同一账号的同店铺最近三个已完成快照中选择最近可比的一次。记录共同栏目、两次采集时间、新观察与未再观察 ASIN，并比较双方都能核实的同一规格组。观察变化并不能判定商品上架或下架，样本有限时上新节奏为未知。
 
 每次任务最多对三件新品栏或新观察商品额外读取公开详情，保存来源、查询时间，以及页面明确标注的首次可售日期或发布日期原文。缺少明确日期、访问失败或跳到其他 ASIN 时保留原因。两类日期含义各自标注。复核时用同一账号先后提交同店铺，比较「打开上期快照」与原始链接和时间，再用 LEGO 等有新品栏的店铺验证公开日期来源。页面、Markdown 和 JSON 使用同一快照。快速测试只用固定样本。
+
+**竞品与品牌定位（REQ-006）。** 在店铺结果打开「竞品与品牌定位」。优先对畅销栏目中两类代表商品读取公开详情，从商品类型、末级类目与标题中可见的对象或款式用词生成搜索。每条搜索保留首屏至多 16 张可读取的样本卡片，排除明确标记为赞助、已采店内商品及已知同品牌。每条搜索最多进一步核对两个相关的候选商品。末级类目相同需至少两个共同标题词，类目不一致或缺失时需至少四个共同标题词，并标为待验证候选。来源、时间、查询、拒读原因和对标入选依据保存在同一任务快照。
+
+对照展示公开单价与币种、评分、评分数、页面卖点、图组和 A+ 可观察情况，并提供商品页和可读取的对标店铺链接。对标范围和评分范围以当前样本为分母，缺少字段时保留未知。价格差只使用同一口径的 USD 单价。受众、差异化与 SWOT 从配对证据提炼，需继续验证的部分明确标记。验收时从 Oakgarden 抽查一个配对，打开搜索源、两件商品或店铺，核对价格差与入选用词。搜索失败用固定夹具复核降级。
 
 REQ-001 复核可从 [Oakgarden 高领上衣栏目](https://www.amazon.com/stores/page/6AFD3679-6AE1-44C6-93BD-943F86AE2B80) 提交一次，核对自动识别首页、畅销栏目及下拉子栏目。分别查看成功与空页，展开同配色尺码和 ASIN 来源，下载采集记录。再用 [LEGO 店铺栏目](https://www.amazon.com/stores/page/91C58ED9-8C8E-4B46-971F-249F016B6925) 核对不同品类、实际样本及上限提示。刷新后从「历史记录」恢复店铺。固定测试覆盖拒绝访问、部分失败、重试成功、活跃请求去重及企业与账号隔离，执行 `uv run pytest -q tests/test_amazon_research.py tests/test_amazon_store_depth.py`。
 

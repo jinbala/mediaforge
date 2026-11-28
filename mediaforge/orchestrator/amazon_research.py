@@ -10,6 +10,7 @@ from mediaforge.db import amazon_research_store as store
 from mediaforge.models.amazon_research_run import (
     AmazonEvidence,
     AmazonResearchRun,
+    AmazonStoreCompetition,
     AmazonStoreSample,
     AmazonStoreSampleScope,
 )
@@ -17,9 +18,13 @@ from mediaforge.orchestrator.amazon_category import collect_category
 from mediaforge.rag.amazon_research import SUGGESTIONS, _fetch_suggestions, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import (
     archive,
+    benchmark_candidates,
+    benchmark_targets,
+    build_benchmark_pair,
     build_product_matrix,
     build_store_lifecycle,
     compare_store_samples,
+    market_query,
     section_index,
     store_public_report,
     summarize_archive,
@@ -28,6 +33,8 @@ from mediaforge.rag.amazon_store_collection import (
     FETCH_CONCURRENCY,
     SECTION_ASIN_LIMIT,
     SECTION_LIMIT,
+    collect_benchmark_listing,
+    collect_benchmark_search,
     collect_evidence,
     collect_listing_date,
     discover_sections,
@@ -225,6 +232,66 @@ async def _report_store_lifecycle(
     snapshot.lifecycle.dates = [saved[asin] for asin in selected]
 
 
+async def _report_competition(
+    run: AmazonResearchRun,
+    token: UUID,
+    products: list[AmazonStoreSample],
+) -> None:
+    targets = benchmark_targets(run.snapshot, products)
+    competition = AmazonStoreCompetition(targets=[item.asin for item in targets])
+    run.snapshot.competition = competition
+    if not targets:
+        return
+    await store.checkpoint(run, token, "competition")
+    async with amazon_public_client() as client:
+        # 按公示产品类型挑两个代表款，每次两条搜索，每条按相关度最多核对两件。
+        details = await asyncio.gather(
+            *(collect_benchmark_listing(client, item.asin) for item in targets)
+        )
+        queries = []
+        for sample, listing in zip(targets, details, strict=True):
+            if listing.title:
+                listing.brand = listing.brand or sample.brand
+                listing.store_url = listing.store_url or sample.store_url
+            competition.listings[listing.asin] = listing
+            if query := market_query(sample, listing):
+                queries.append((listing.asin, query))
+        competition.searches = await asyncio.gather(
+            *(collect_benchmark_search(client, asin, query) for asin, query in queries)
+        )
+        own_asins = {item.asin for item in products}
+        own_brands = {item.brand.casefold() for item in targets if item.brand}
+        selected = {
+            search.target_asin: benchmark_candidates(
+                search,
+                competition.listings[search.target_asin],
+                own_asins,
+                own_brands,
+            )
+            for search in competition.searches
+        }
+        # 每批最多两个详情并发。搜索结果先保存，后续详情缺失时也能查找来源。
+        await store.checkpoint(run, token, "competition")
+        candidates = list(dict.fromkeys(asin for group in selected.values() for asin in group))
+        for pos in range(0, len(candidates), 2):
+            listings = await asyncio.gather(
+                *(collect_benchmark_listing(client, asin) for asin in candidates[pos : pos + 2])
+            )
+            competition.listings.update((item.asin, item) for item in listings)
+        competition.pairs = [
+            pair
+            for target, rivals in selected.items()
+            for rival in rivals
+            if (
+                pair := build_benchmark_pair(
+                    competition.listings[target],
+                    competition.listings[rival],
+                )
+            )
+            is not None
+        ]
+
+
 async def process_research(run_id: UUID, attempt: int) -> bool:
     started = monotonic()
     run, token, busy = await store.claim_run(run_id, attempt)
@@ -252,6 +319,7 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         listings = _update_report(run)
         snapshot.product_matrix = build_product_matrix(snapshot, listings)
         await _report_store_lifecycle(run, token, listings)
+        await _report_competition(run, token, listings)
         sections = [
             item
             for item in snapshot.evidence
@@ -265,6 +333,8 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
                 for item in snapshot.evidence
             )
             or snapshot.translation_status in {"incomplete", "failed"}
+            or any(search.status == "failed" for search in snapshot.competition.searches)
+            or any(item.problem for item in snapshot.competition.listings.values())
         )
         status = "failed" if not useful else "partial_fail" if partial else "done"
         error = (
@@ -282,7 +352,8 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
             token,
             "boards" if run.mode == "bestsellers" else "section",
             status="partial_fail" if run.report else "failed",
-            error="榜单采集未完成，已保存可用样本。" if run.mode == "bestsellers"
+            error="榜单采集未完成，已保存可用样本。"
+            if run.mode == "bestsellers"
             else "栏目采集未完成，已保存可用样本。",
         )
     logger.info(

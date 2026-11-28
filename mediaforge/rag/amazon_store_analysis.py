@@ -8,7 +8,10 @@ from uuid import UUID
 
 from mediaforge.models.amazon_research import AmazonResearchReport, AmazonStorePage
 from mediaforge.models.amazon_research_run import (
+    AmazonBenchmarkPair,
+    AmazonBenchmarkSearch,
     AmazonEvidence,
+    AmazonMarketListing,
     AmazonPriceBand,
     AmazonPriceObservation,
     AmazonRatedStyle,
@@ -217,7 +220,7 @@ _COUNT = re.compile(r"(?:\d{1,3}(?:,\d{3}){1,3}|\d{1,10})")
 _MODEL_SUFFIX = re.compile(r"(?<![\w.])([A-Z]{1,3}-?\d{3,7}|\d{4,7})\s*$")
 
 
-def public_usd_cents(product: AmazonStoreSample) -> int | None:
+def public_usd_cents(product: AmazonStoreSample | AmazonMarketListing) -> int | None:
     # 仅使用单个明确的美元报价，保留区间、非 USD 和无法识别的原始金额供复核。
     if product.price_currency not in {None, "USD"}:
         return None
@@ -410,6 +413,184 @@ def build_store_lifecycle(
         missing_color=len(products) - sum(colors.values()),
         missing_size=len(products) - sum(sizes.values()),
         change=change,
+    )
+
+
+_MARKET_STOP_WORDS = {
+    "the",
+    "with",
+    "and",
+    "for",
+    "pack",
+    "new",
+    "amazon",
+    "women",
+    "woman",
+    "womens",
+    "men",
+    "mens",
+    "size",
+    "color",
+    "small",
+    "medium",
+    "large",
+}
+_MARKET_AUDIENCES = {
+    "women": re.compile(r"\b(?:women(?:'s|s)?|ladies)\b", re.I),
+    "men": re.compile(r"\bmen(?:'s|s)?\b", re.I),
+    "children": re.compile(r"\b(?:kids|children|toddler)\b", re.I),
+}
+
+
+def benchmark_targets(
+    snapshot: AmazonResearchSnapshot,
+    products: list[AmazonStoreSample],
+) -> list[AmazonStoreSample]:
+    # 代表样本优先来自畅销栏。每种平台类型最多一个，避免同款颜色占完对标预算。
+    popular = {
+        item.asin
+        for section in section_samples(snapshot)
+        if section.role == "popular"
+        for item in section.products
+    }
+    selected = {}
+    for sample in sorted(products, key=lambda item: item.asin not in popular):
+        if sample.brand and sample.product_type and sample.title != sample.asin:
+            selected.setdefault(sample.product_type, sample)
+    return list(selected.values())[:2]
+
+
+def _market_audience(title: str) -> str | None:
+    return next(
+        (kind for kind, pattern in _MARKET_AUDIENCES.items() if pattern.search(title)), None
+    )
+
+
+def _market_terms(title: str) -> set[str]:
+    words = set(re.findall(r"[a-z]{3,}", title.casefold())) - _MARKET_STOP_WORDS
+    return {word.removesuffix("s") if not word.endswith("ss") else word for word in words}
+
+
+def market_query(sample: AmazonStoreSample, details: AmazonMarketListing) -> str | None:
+    if not details.title or details.problem:
+        return None
+    title = details.title.casefold().replace("-", " ").replace("’", "'")
+    audience = _market_audience(title)
+    style = next(
+        (
+            term
+            for term in (
+                "maternity nursing",
+                "long sleeve",
+                "short sleeve",
+                "wide leg",
+                "mock neck",
+                "crew neck",
+                "race car",
+                "starship",
+                "building blocks",
+            )
+            if term in title
+        ),
+        "",
+    )
+    fallback = (sample.product_type or "").replace("_", " ").lower()
+    category = details.category or fallback
+    if category.casefold() in {"clothing", "women", "men", "toys & games"}:
+        category = fallback
+    prefix = {"women": "women's", "men": "men's", "children": "kids"}.get(audience, "")
+    return " ".join(part for part in (prefix, style, category) if part)[:100] or None
+
+
+def benchmark_candidates(
+    search: AmazonBenchmarkSearch,
+    target: AmazonMarketListing,
+    own_asins: set[str],
+    own_brands: set[str],
+) -> list[str]:
+    target_title = target.title or ""
+    audience = _market_audience(target_title)
+    target_terms = _market_terms(target_title) - _market_terms(target.brand or "")
+    scored = []
+    for index, sample in enumerate(search.candidates):
+        candidate_audience = _market_audience(sample.title)
+        if sample.asin in own_asins or (audience and candidate_audience not in {None, audience}):
+            continue
+        if any(
+            brand and re.search(rf"\b{re.escape(brand)}\b", sample.title.casefold())
+            for brand in own_brands
+        ):
+            continue
+        shared = target_terms & _market_terms(sample.title)
+        if len(shared) >= 2:
+            scored.append((-len(shared), index, sample.asin))
+    # 同一搜索中先核对标题更接近的前两件，关键词来自页面，未标注为搜索量。
+    return [asin for _, _, asin in sorted(scored)[:2]]
+
+
+def build_benchmark_pair(
+    target: AmazonMarketListing,
+    rival: AmazonMarketListing,
+) -> AmazonBenchmarkPair | None:
+    if not target.title or not rival.title or not target.brand or not rival.brand:
+        return None
+    if target.brand.casefold() == rival.brand.casefold():
+        return None
+    own_audience, rival_audience = _market_audience(target.title), _market_audience(rival.title)
+    if own_audience and rival_audience and own_audience != rival_audience:
+        return None
+    terms = sorted(
+        (_market_terms(target.title) - _market_terms(target.brand))
+        & (_market_terms(rival.title) - _market_terms(rival.brand))
+    )
+    same_category = (
+        target.category
+        and rival.category
+        and (target.category.casefold() == rival.category.casefold())
+    )
+    # 类目不同或缺失时，需更多标题用词作为依据，明确标为待验证候选。
+    if len(terms) < (2 if same_category else 4):
+        return None
+    left, right = public_usd_cents(target), public_usd_cents(rival)
+    gap = left - right if left is not None and right is not None else None
+    own_rating = (
+        float(target.rating)
+        if target.rating and re.fullmatch(r"[0-5](?:\.\d+)?", target.rating)
+        else None
+    )
+    rival_rating = (
+        float(rival.rating)
+        if rival.rating and re.fullmatch(r"[0-5](?:\.\d+)?", rival.rating)
+        else None
+    )
+    strengths = (
+        "此款样本标价较低，可进一步核对同规格价值。"
+        if gap is not None and gap < 0
+        else "当前公开样本未支持价格优势。"
+    )
+    weakness = (
+        "此款公开评分低于对标样本，可进一步核查反馈主题。"
+        if own_rating is not None and rival_rating is not None and own_rating < rival_rating
+        else "样本不足以确认相对评分劣势。"
+    )
+    opportunity = "按共同标题用词核查买家用途，再比较两款的可验证规格和卖点。"
+    threat = (
+        "对标样本标价较低，核对套装、尺寸或材质差异后再比较。"
+        if gap is not None and gap > 0
+        else "竞争威胁待验证，当前覆盖少量公开样本。"
+    )
+    return AmazonBenchmarkPair(
+        target_asin=target.asin,
+        competitor_asin=rival.asin,
+        shared_terms=terms,
+        shared_category=target.category if same_category else None,
+        audience={"women": "女性款标记", "men": "男性款标记", "children": "儿童款标记"}.get(
+            own_audience
+        )
+        if own_audience and own_audience == rival_audience
+        else None,
+        price_gap_cents=gap,
+        swot={"优势": strengths, "劣势": weakness, "机会": opportunity, "威胁": threat},
     )
 
 
