@@ -157,6 +157,7 @@ export function formatAmazonReport(report: AmazonReport, brief: string, run?: Am
   if (matrix && run) lines.push(...formatAmazonProductMatrix(run, matrix, escape))
   if (run?.snapshot.lifecycle) lines.push(...formatAmazonLifecycle(run.snapshot.lifecycle, escape))
   if (run?.snapshot.competition) lines.push(...formatAmazonCompetition(run.snapshot.competition, escape))
+  if (run?.snapshot.revenue) lines.push(...formatAmazonRevenue(run, run.snapshot.revenue, escape))
   const archive = run?.snapshot.product_archive
   if (archive) {
     lines.push('', '### 商品归档', '', ...amazonArchiveCounts(archive).map(([label, count]) => '- ' + label + ' · ' + count))
@@ -312,6 +313,8 @@ export type AmazonMarketListing = {
   price_currency: string | null
   rating: string | null
   rating_count: string | null
+  monthly_bought?: number | null
+  monthly_bought_label?: string | null
   highlights: string[]
   image_count: number | null
   has_aplus: boolean | null
@@ -339,6 +342,30 @@ export type AmazonStoreCompetition = {
     price_gap_cents: number | null
     swot: Record<string, string>
   }[]
+}
+
+type AmazonScenarioValues = [number, number, number]
+export type AmazonRevenueTotals = { units: AmazonScenarioValues | null; cents: AmazonScenarioValues | null }
+export type AmazonRevenueSample = {
+  family_asin: string
+  asin: string
+  members: string[]
+  sections: string[]
+  segment: 'representative' | 'tail'
+  listing: AmazonMarketListing | null
+  price_cents: number | null
+  monthly: AmazonRevenueTotals
+}
+export type AmazonStoreRevenue = {
+  family_count: number
+  unknown_family_count: number
+  representative_count: number
+  samples: AmazonRevenueSample[]
+  factors_percent: AmazonScenarioValues
+  annual_months: number
+  monthly: Record<'representative' | 'tail' | 'sample', AmazonRevenueTotals>
+  public_store?: AmazonRevenueTotals
+  section_monthly: Record<string, AmazonRevenueTotals>
 }
 
 export type AmazonRun = AmazonRunSummary & {
@@ -369,6 +396,7 @@ export type AmazonRun = AmazonRunSummary & {
     product_matrix?: AmazonStoreProductMatrix | null
     lifecycle?: AmazonStoreLifecycle | null
     competition?: AmazonStoreCompetition | null
+    revenue?: AmazonStoreRevenue | null
   }
 }
 
@@ -586,5 +614,74 @@ function formatAmazonCompetition(competition: AmazonStoreCompetition, escape: (v
         ...Object.entries(pair.swot).map(([label, text]) => `- ${label}（基于上面两个 ASIN）· ${escape(text)}`),
       ]
     }) : ['当前无可复核的对标配对。']),
+  ]
+}
+
+export const amazonRevenueLabels = { representative: '代表款', tail: '长尾样本', sample: '已支持的店内样本汇总' } as const
+
+export function amazonRevenueRows(revenue: AmazonStoreRevenue) {
+  const { representative, tail, sample } = revenue.monthly
+  return [
+    { label: amazonRevenueLabels.representative, totals: representative },
+    { label: amazonRevenueLabels.tail, totals: tail },
+    { label: amazonRevenueLabels.sample, totals: sample },
+    { label: '全店公开目录估算', totals: revenue.public_store ?? { units: null, cents: null } },
+  ]
+}
+
+export function amazonRevenueCoverage(revenue: AmazonStoreRevenue) {
+  const units = revenue.samples.filter((item) => item.monthly.units !== null).length
+  const priced = revenue.samples.filter((item) => item.monthly.cents !== null).length
+  const tail = revenue.family_count - revenue.representative_count
+  return `已确认 ${revenue.family_count} 款（代表款 ${revenue.representative_count} 款，其他 ${tail} 款）。${revenue.samples.length} 款进入详情样本，${units} 款有销量基数，${priced} 款有营收依据。另有 ${revenue.unknown_family_count} 个同款关系待确认的 ASIN 未纳入汇总。`
+}
+
+export function amazonRevenueRules(revenue: AmazonStoreRevenue) {
+  const factors = revenue.factors_percent.map((value) => (value / 100).toFixed(2)).join('／')
+  return [
+    `低／中／高按公开「过去一月 N+ 购买」基数 × ${factors}，按 1 次购买计 1 个销售包装并四舍五入。倍数为情景假设，实际销量和情景上界均未经验证。月毛营收为情景件数 × 同一 ASIN 公开 USD 标价，年化乘 ${revenue.annual_months}，未扣折扣、退货、平台费用或税费，也未校正季节。`,
+    '同款使用 Amazon 规格关系核对，每款只用一个 ASIN。即使变体或栏目共享评分池，也不累计评分数或用评论率、BSR 换算销量。栏目按该款已采来源等分，件数和分币分别按稳定栏目顺序分余数。',
+    '全店实际月／年销量及营收未知。只有公开店铺导航完整、所有已采 ASIN 的同款关系可确认、每款有相应估算依据时，才输出公开目录的整体情景。样本汇总仅覆盖有相应证据的款式。',
+  ]
+}
+
+export function amazonRevenueSummary(totals: AmazonRevenueTotals, annualMonths: number) {
+  const units = (values: AmazonScenarioValues, months: number) => values.map((value) => (value * months).toLocaleString('zh-CN')).join('／')
+  const usd = (values: AmazonScenarioValues, months: number) => 'USD ' + values.map((value) => (value * months / 100).toFixed(2)).join('／')
+  const { units: count, cents } = totals
+  return `月销量 ${count ? units(count, 1) + ' 包装' : '未知'} · 年化销量 ${count ? units(count, annualMonths) + ' 包装' : '未知'} · 月毛营收 ${cents ? usd(cents, 1) : '未知'} · 年化毛营收 ${cents ? usd(cents, annualMonths) : '未知'}`
+}
+
+export function amazonRevenueBasis(sample: AmazonRevenueSample) {
+  const { listing } = sample
+  if (!listing) return '公开详情待采。'
+  if (listing.problem) return listing.problem
+  const badge = listing.monthly_bought_label ? `${listing.monthly_bought_label}（基数 ${listing.monthly_bought}）` : '页面未见可用于估算的购买提示'
+  const price = sample.price_cents !== null ? 'USD ' + (sample.price_cents / 100).toFixed(2) : `有效 USD 单价未知（原文 ${listing.price ?? '缺失'}）`
+  return `${badge} · ${price} · 采集 ${amazonTime(listing.collected_at)}`
+}
+
+export function amazonRevenueSections(run: AmazonRun, revenue: AmazonStoreRevenue) {
+  return run.snapshot.evidence.flatMap((section) => {
+    const monthly = revenue.section_monthly[section.key]
+    return monthly ? [{ section, monthly }] : []
+  })
+}
+
+function formatAmazonRevenue(run: AmazonRun, revenue: AmazonStoreRevenue, escape: (value: string) => string) {
+  const title = (section: AmazonEvidence) => section.title_zh ?? section.title
+  const sections = amazonRevenueSections(run, revenue)
+  const link = (section: AmazonEvidence) => `[${escape(title(section))}](${section.final_url ?? section.url})`
+  return [
+    '', '### 销量与营收估算', '', '情景顺序为低／中／高。',
+    amazonRevenueCoverage(revenue), ...amazonRevenueRules(revenue),
+    ...amazonRevenueRows(revenue).map(({ label, totals }) => `- ${label} · ${amazonRevenueSummary(totals, revenue.annual_months)}`),
+    ...revenue.samples.map((sample) => {
+      const name = sample.listing ? `[${sample.asin}](${sample.listing.url})` : sample.asin
+      const sources = sections.filter(({ section }) => sample.sections.includes(section.key)).map(({ section }) => link(section))
+      return `- ${amazonRevenueLabels[sample.segment]} ${name} · ${escape(amazonRevenueBasis(sample))} · ${amazonRevenueSummary(sample.monthly, revenue.annual_months)}\n  - 同款 ${sample.family_asin}（${sample.members.join('、')}） · 栏目 ${sources.join('、') || '未知'}`
+    }),
+    '', '#### 栏目贡献',
+    ...sections.map(({ section, monthly }) => `- ${link(section)} · ${amazonRevenueSummary(monthly, revenue.annual_months)}`),
   ]
 }

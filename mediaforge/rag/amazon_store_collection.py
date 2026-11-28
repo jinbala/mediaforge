@@ -1,6 +1,7 @@
 import asyncio
 import re
 from datetime import UTC, datetime
+from decimal import Decimal
 from time import monotonic
 from typing import Literal
 from urllib.parse import unquote, urlencode, urljoin, urlsplit
@@ -27,7 +28,7 @@ from mediaforge.rag.amazon_research import (
     _first_text,
     _linked_source,
     _parse_listings,
-    _parse_report,
+    _parse_product,
     _rating,
     _store_pages,
     _store_product_cards,
@@ -549,26 +550,47 @@ async def collect_benchmark_search(
         )
 
 
-async def collect_benchmark_listing(client: httpx.AsyncClient, asin: str) -> AmazonMarketListing:
+_MONTHLY_BOUGHT = re.compile(
+    r"\b(\d{1,3}(?:,\d{3}){1,3}|\d{1,7})(\.\d{1,2})?\s*([KM]?)\+\s+bought in past month\b",
+    re.I,
+)
+
+
+def _market_listing(html: bytes, url: str) -> AmazonMarketListing:
+    soup = BeautifulSoup(html, "html.parser", from_encoding="utf-8")
+    if soup.select_one('form[action*="validateCaptcha"], #captchacharacters'):
+        raise AmazonFetchError("Amazon 返回了访问验证，请稍后重试。", "captcha")
+    product = _parse_product(soup, url, "")
+    count = label = None
+    # 仅使用同一公开商品页的过去一月购买提示，保留原文供复算。
+    badge = _first_text(
+        soup, "#social-proofing-faceout-title-tk_bought", "#socialProofingAsinFaceout_feature_div"
+    )
+    if match := _MONTHLY_BOUGHT.search(badge or ""):
+        scale = {"": 1, "K": 1_000, "M": 1_000_000}[match[3].upper()]
+        value = Decimal(match[1].replace(",", "") + (match[2] or "")) * scale
+        if 0 < value <= 10_000_000 and value == value.to_integral_value():
+            count, label = int(value), match[0]
+    return AmazonMarketListing(
+        url=url,
+        collected_at=datetime.now(UTC),
+        price_currency=_currency(product.price),
+        monthly_bought=count,
+        monthly_bought_label=label,
+        **product.model_dump(include={
+            "asin", "title", "brand", "store_url", "category", "price", "rating",
+            "rating_count", "highlights", "image_count", "has_aplus",
+        }),
+    )
+
+
+async def collect_market_listing(client: httpx.AsyncClient, asin: str) -> AmazonMarketListing:
     url = normalize_source("product", asin)
     collected_at = datetime.now(UTC)
     try:
         final, html = await _fetch_page(client, "product", url)
         if final != url:
-            raise AmazonFetchError("商品页面跳转到不同 ASIN，未将其归入对标。", "redirect")
-        report = await asyncio.to_thread(_parse_report, "product", final, html, "")
-        product = report.product
-        assert product is not None
-        details = product.model_dump(
-            include=set(AmazonMarketListing.model_fields)
-            - {"url", "asin", "collected_at", "price_currency", "problem"}
-        )
-        return AmazonMarketListing(
-            asin=asin,
-            url=final,
-            collected_at=report.collected_at,
-            price_currency=_currency(product.price),
-            **details,
-        )
+            raise AmazonFetchError("商品页面跳转到不同 ASIN，未使用其详情。", "redirect")
+        return await asyncio.to_thread(_market_listing, html, final)
     except AmazonFetchError as exc:
         return AmazonMarketListing(asin=asin, url=url, collected_at=collected_at, problem=str(exc))

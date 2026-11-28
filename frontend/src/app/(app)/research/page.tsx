@@ -25,6 +25,7 @@ import { AmazonSkills } from '@/components/research/AmazonSkills'
 import { AmazonScriptTools } from '@/components/research/AmazonScriptTools'
 import { AmazonStoreProductMatrix } from '@/components/research/AmazonStoreProductMatrix'
 import { AmazonStoreBenchmarks } from '@/components/research/AmazonStoreBenchmarks'
+import { AmazonStoreRevenue } from '@/components/research/AmazonStoreRevenue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -588,6 +589,7 @@ export default function ResearchPage() {
       {run?.mode === 'bestsellers' && <AmazonCategoryReport run={run} onProduct={(url) => openRelated('product', url)} />}
       {run?.mode === 'store' && run.snapshot.product_matrix && <AmazonStoreProductMatrix key={'matrix-' + run.id} run={run} matrix={run.snapshot.product_matrix} onOpen={(id) => void openRun(id)} />}
       {run?.snapshot.competition && !activeAmazonRun(run) && <AmazonStoreBenchmarks competition={run.snapshot.competition} />}
+      {run?.snapshot.revenue && <AmazonStoreRevenue run={run} revenue={run.snapshot.revenue} />}
 
       {report && (!run || run.mode === 'store') && (
         <article className="space-y-5" aria-label="调研报告">

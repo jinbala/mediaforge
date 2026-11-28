@@ -29,6 +29,7 @@ from mediaforge.rag.amazon_research import AMAZON, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import (
     archive,
     build_product_matrix,
+    calculate_store_revenue,
     section_index,
     summarize_archive,
 )
@@ -148,6 +149,9 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
         200,
         text="<table><tr><th>Date First Available</th><td>November 1, 2026</td></tr></table>",
     )
+    listing = respx.get(f"{AMAZON}/dp/{IDS[0]}").respond(
+        200, text='<span id="productTitle">Cotton Ribbed Top</span>'
+    )
 
     respx.get(ABOUT).respond(200, text="<main>Fixture manufacturer information.</main>")
     retry = respx.get(FAILED).respond(503)
@@ -207,7 +211,7 @@ async def test_store_run_discovers_subpages_and_retries_only_selected_page(api):
     assert latest["status"] == "done", latest.get("error")
     recovered = next(item for item in latest["snapshot"]["evidence"] if item["key"] == failed_key)
     assert recovered["status"] == "empty" and recovered["attempts"] == 2
-    assert len(home.calls) == len(entry.calls) == len(listing_date.calls) == 1
+    assert len(home.calls) == len(entry.calls) == len(listing_date.calls) == len(listing.calls) == 1
     assert len(retry.calls) == 2
 
     repeated = await client.post(API, json=payload)
@@ -571,6 +575,10 @@ def test_empty_product_matrix_preserves_unknown_price_share():
 @respx.mock
 async def test_store_lifecycle_compares_same_owner_snapshots_and_keeps_observation_dates(api):
     client, _, identity, _, _ = api
+    for asin in IDS[:2]:
+        respx.get(f"{AMAZON}/dp/{asin}").respond(
+            200, text='<span id="productTitle">Cotton Ribbed Top</span>'
+        )
     entry = respx.get(INITIAL)
     entry.respond(200, text=_cards(IDS[0], IDS[1]))
     first = await client.post(API, json={"mode": "store", "source": INITIAL})
@@ -624,6 +632,7 @@ async def test_store_benchmark_uses_public_search_and_records_comparison_sources
         "title": {"displayString": title},
         "productCategory": {"productType": "SHIRT"},
         "byLine": {"contributors": [{"roles": [{"type": "BRAND"}], "name": "Fixture"}]},
+        "hasVariations": False,
     }
     respx.get(INITIAL).respond(
         200,
@@ -647,7 +656,10 @@ async def test_store_benchmark_uses_public_search_and_records_comparison_sources
         '''
 
     rival_store = f"{AMAZON}/stores/Rival/page/66666666-6666-6666-6666-666666666666"
-    respx.get(f"{AMAZON}/dp/{target}").respond(200, text=details("Fixture", "$20.99", INITIAL))
+    target_route = respx.get(f"{AMAZON}/dp/{target}").respond(
+        200, text=details("Fixture", "$20.99", INITIAL)
+        + '<span id="social-proofing-faceout-title-tk_bought">100+ bought in past month</span>'
+    )
     respx.get(f"{AMAZON}/dp/{rival}").respond(200, text=details("Rival", "$25.99", rival_store))
     lookup = f"{AMAZON}/s?" + urlencode({"k": "women's long sleeve T-Shirts"})
     search = respx.get(lookup).respond(
@@ -666,6 +678,14 @@ async def test_store_benchmark_uses_public_search_and_records_comparison_sources
     request = await client.post(API, json={"mode": "store", "source": INITIAL})
     result = await _run_submitted(client, request.json()["id"])
     report = result["snapshot"]["competition"]
+    revenue = result["snapshot"]["revenue"]["samples"][0]
+    assert len(target_route.calls) == 1
+    assert revenue["listing"]["monthly_bought"] == 100
+    assert revenue["monthly"]["cents"] == [209900, 262375, 314850]
+    saved = AmazonResearchSnapshot.model_validate(result["snapshot"])
+    saved.store_root = INITIAL
+    calculate_store_revenue(saved, saved.revenue)
+    assert saved.revenue.public_store == saved.revenue.monthly["sample"]
     if not search_available:
         assert result["status"] == "partial_fail"
         assert result["report"]["listings"][0]["asin"] == target
@@ -683,3 +703,79 @@ async def test_store_benchmark_uses_public_search_and_records_comparison_sources
     assert "sleeve" in report["pairs"][0]["shared_terms"]
     assert report["pairs"][0]["audience"] == "女性款标记"
     assert "较低" in report["pairs"][0]["swot"]["优势"]
+
+
+@respx.mock
+async def test_store_revenue_keeps_missing_evidence_and_allocates_deduplicated_scenarios(api):
+    client, _, _, _, _ = api
+    first, variant, _ = IDS
+    second, third, fourth, outside = ("B000000004", "B000000005", "B000000006", "B000000007")
+    unknown = "B000000008"
+    single = [
+        {
+            "asin": asin,
+            "detailPageLinkURL": f"/dp/{asin}",
+            "title": {"displayString": f"Fixture {asin}"},
+            "hasVariations": False,
+        }
+        for asin in (second, third, fourth, outside)
+    ]
+    respx.get(INITIAL).respond(
+        200,
+        text=_cards(first, variant)
+        + f'<a href="/dp/{unknown}">Unknown family</a>'
+        + "".join(f'<a href="/dp/{card["asin"]}">Independent product</a>' for card in single)
+        + f'<script>{json.dumps({"products": single})}</script>'
+        + _nav(("Collection", HOME), ("Independent Collection", ABOUT)),
+    )
+    respx.get(HOME).respond(200, text=_cards(variant))
+    respx.get(ABOUT).respond(200, text=_cards(first))
+
+    def detail(price, badge):
+        return f'''
+        <span id="productTitle">Fixture public product</span>
+        <div id="corePrice_feature_div"><span class="a-price">
+          <span class="a-offscreen">{price}</span></span></div>
+        <div id="socialProofingAsinFaceout_feature_div"><span>{badge}</span></div>
+        '''
+
+    listing = respx.get(f"{AMAZON}/dp/{first}").respond(
+        200, text=detail("$20.99", "100+ bought in past month")
+    )
+    respx.get(f"{AMAZON}/dp/{second}").respond(
+        200, text=detail("$50.00", "100 bought in past week")
+    )
+    respx.get(f"{AMAZON}/dp/{third}").respond(
+        200, text=detail("CA$10.00", "1.2K+ bought in past month")
+    )
+    respx.get(f"{AMAZON}/dp/{fourth}").respond(503)
+    request = await client.post(API, json={"mode": "store", "source": INITIAL})
+    result = await _run_submitted(client, request.json()["id"])
+    revenue = result["snapshot"]["revenue"]
+    assert result["status"] == "partial_fail"
+    assert result["stage"] == "report"
+    assert revenue["family_count"] == 5 and revenue["unknown_family_count"] == 1
+    assert revenue["public_store"] == {"units": None, "cents": None}
+    assert revenue["factors_percent"] == [100, 125, 150] and revenue["annual_months"] == 12
+    samples = {sample["asin"]: sample for sample in revenue["samples"]}
+    assert set(samples) == {first, second, third, fourth}
+    assert len(listing.calls) == 1
+    assert samples[first]["members"] == [first, variant]
+    assert len(samples[first]["sections"]) == 3
+    assert samples[first]["monthly"] == {
+        "units": [100, 125, 150],
+        "cents": [209900, 262375, 314850],
+    }
+    assert samples[second]["monthly"]["units"] is None
+    assert samples[third]["monthly"] == {"units": [1200, 1500, 1800], "cents": None}
+    assert samples[fourth]["listing"]["problem"]
+    totals = revenue["monthly"]
+    assert totals["sample"] == {"units": [1300, 1625, 1950], "cents": [209900, 262375, 314850]}
+    assert totals["representative"] == samples[first]["monthly"]
+    assert totals["tail"] == samples[third]["monthly"]
+    contributions = revenue["section_monthly"]
+    assert sorted(value["cents"][0] for value in contributions.values()) == [69966, 69967, 69967]
+    section_units = [value["units"] for value in contributions.values()]
+    assert list(map(sum, zip(*section_units, strict=True))) == [1300, 1625, 1950]
+    stored = (await client.get(f"{API}/{result['id']}")).json()
+    assert stored["snapshot"]["revenue"] == revenue

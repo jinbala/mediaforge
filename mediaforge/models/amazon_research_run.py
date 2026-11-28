@@ -166,6 +166,8 @@ class AmazonMarketListing(BaseModel):
     price_currency: str | None = None
     rating: str | None = None
     rating_count: str | None = None
+    monthly_bought: int | None = None
+    monthly_bought_label: str | None = None
     highlights: list[str] = Field(default_factory=list)
     image_count: int | None = None
     has_aplus: bool | None = None
@@ -202,6 +204,34 @@ class AmazonStoreCompetition(BaseModel):
     searches: list[AmazonBenchmarkSearch] = Field(default_factory=list)
     listings: dict[str, AmazonMarketListing] = Field(default_factory=dict)
     pairs: list[AmazonBenchmarkPair] = Field(default_factory=list)
+
+
+class AmazonRevenueTotals(BaseModel):
+    units: tuple[int, int, int] | None = None
+    cents: tuple[int, int, int] | None = None
+
+
+class AmazonRevenueSample(BaseModel):
+    family_asin: str
+    asin: str
+    members: list[str]
+    sections: list[str]
+    segment: Literal["representative", "tail"]
+    listing: AmazonMarketListing | None = None
+    price_cents: int | None = None
+    monthly: AmazonRevenueTotals = Field(default_factory=AmazonRevenueTotals)
+
+
+class AmazonStoreRevenue(BaseModel):
+    family_count: int
+    unknown_family_count: int
+    representative_count: int
+    samples: list[AmazonRevenueSample]
+    factors_percent: tuple[int, int, int] = (100, 125, 150)
+    annual_months: int = 12
+    monthly: dict[str, AmazonRevenueTotals] = Field(default_factory=dict)
+    public_store: AmazonRevenueTotals = Field(default_factory=AmazonRevenueTotals)
+    section_monthly: dict[str, AmazonRevenueTotals] = Field(default_factory=dict)
 
 
 class AmazonEvidence(BaseModel):
@@ -243,6 +273,7 @@ class AmazonResearchSnapshot(BaseModel):
     product_matrix: AmazonStoreProductMatrix | None = None
     lifecycle: AmazonStoreLifecycle | None = None
     competition: AmazonStoreCompetition | None = None
+    revenue: AmazonStoreRevenue | None = None
     translation_status: StepStatus = "pending"
     translation_missing: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

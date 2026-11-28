@@ -17,6 +17,8 @@ from mediaforge.models.amazon_research_run import (
     AmazonRatedStyle,
     AmazonResearchRunRequest,
     AmazonResearchSnapshot,
+    AmazonRevenueSample,
+    AmazonRevenueTotals,
     AmazonSectionMetrics,
     AmazonSectionOverlap,
     AmazonSeriesChange,
@@ -25,6 +27,7 @@ from mediaforge.models.amazon_research_run import (
     AmazonStoreIdentity,
     AmazonStoreLifecycle,
     AmazonStoreProductMatrix,
+    AmazonStoreRevenue,
     AmazonStoreSample,
 )
 
@@ -458,6 +461,137 @@ def benchmark_targets(
         if sample.brand and sample.product_type and sample.title != sample.asin:
             selected.setdefault(sample.product_type, sample)
     return list(selected.values())[:2]
+
+
+def select_revenue_samples(
+    snapshot: AmazonResearchSnapshot, products: list[AmazonStoreSample]
+) -> AmazonStoreRevenue:
+    groups = defaultdict(list)
+    for product in products:
+        if product.family_asin:
+            groups[product.family_asin].append(product)
+    popular = {
+        item.asin
+        for section in section_samples(snapshot)
+        if section.role == "popular" and section.code != "duplicate"
+        for item in section.products
+    }
+    # 头部优先取畅销栏及公开评分数领先的已确认款。长尾从其余款中取样。
+    ranked = sorted(
+        groups,
+        key=lambda family: (
+            not any(item.asin in popular for item in groups[family]),
+            -max(_rating_total(item) or 0 for item in groups[family]),
+            family,
+        ),
+    )
+    representative_count = min(2, len(ranked))
+    previous = {
+        item.asin: item.listing
+        for item in (snapshot.revenue.samples if snapshot.revenue else [])
+        if item.listing and not item.listing.problem
+    }
+    if competition := snapshot.competition:
+        for asin in competition.targets:
+            listing = competition.listings.get(asin)
+            if listing and not listing.problem:
+                previous.setdefault(asin, listing)
+    sources = section_index(snapshot)
+    samples = []
+    for index, family in enumerate(ranked[:4]):
+        members = sorted(item.asin for item in groups[family])
+        sample = min(
+            groups[family],
+            key=lambda item: (
+                -(previous[item.asin].monthly_bought or 0) if item.asin in previous else 0,
+                item.asin not in previous,
+                public_usd_cents(item) is None,
+                -(_rating_total(item) or 0),
+                item.asin,
+            ),
+        )
+        samples.append(
+            AmazonRevenueSample(
+                family_asin=family,
+                asin=sample.asin,
+                members=members,
+                sections=sorted({key for asin in members for key in sources.get(asin, [])}),
+                segment="representative" if index < representative_count else "tail",
+                listing=previous.get(sample.asin),
+            )
+        )
+    return AmazonStoreRevenue(
+        family_count=len(groups),
+        unknown_family_count=sum(item.family_asin is None for item in products),
+        representative_count=representative_count,
+        samples=samples,
+    )
+
+
+def _sum_revenue(rows: list[AmazonRevenueTotals]) -> AmazonRevenueTotals:
+    units = [row.units for row in rows if row.units is not None]
+    cents = [row.cents for row in rows if row.cents is not None]
+    return AmazonRevenueTotals(
+        units=tuple(map(sum, zip(*units, strict=True))) if units else None,
+        cents=tuple(map(sum, zip(*cents, strict=True))) if cents else None,
+    )
+
+
+def _allocate_revenue(
+    values: tuple[int, int, int] | None, index: int, sections: int
+) -> tuple[int, int, int] | None:
+    if values is None:
+        return None
+    # 件数和分币等分，用稳定栏目顺序分配余数，跨栏目合计恰好等于样本汇总。
+    return tuple(value // sections + int(index < value % sections) for value in values)
+
+
+def calculate_store_revenue(snapshot: AmazonResearchSnapshot, revenue: AmazonStoreRevenue) -> None:
+    sections = [item for item in section_samples(snapshot) if item.code != "duplicate"]
+    by_section: dict[str, list[AmazonRevenueTotals]] = {item.key: [] for item in sections}
+    by_segment: dict[str, list[AmazonRevenueTotals]] = {"representative": [], "tail": []}
+    for sample in revenue.samples:
+        listing = sample.listing
+        if listing is not None and not listing.problem:
+            sample.price_cents = public_usd_cents(listing)
+            if listing.monthly_bought and listing.monthly_bought_label:
+                units = tuple(
+                    (listing.monthly_bought * factor + 50) // 100
+                    for factor in revenue.factors_percent
+                )
+                sample.monthly = AmazonRevenueTotals(
+                    units=units,
+                    cents=tuple(value * sample.price_cents for value in units)
+                    if sample.price_cents is not None
+                    else None,
+                )
+        by_segment[sample.segment].append(sample.monthly)
+        for index, key in enumerate(sample.sections):
+            by_section[key].append(
+                AmazonRevenueTotals(
+                    units=_allocate_revenue(sample.monthly.units, index, len(sample.sections)),
+                    cents=_allocate_revenue(sample.monthly.cents, index, len(sample.sections)),
+                )
+            )
+    revenue.monthly = {segment: _sum_revenue(rows) for segment, rows in by_segment.items()}
+    sample_totals = _sum_revenue([item.monthly for item in revenue.samples])
+    revenue.monthly["sample"] = sample_totals
+    revenue.section_monthly = {key: _sum_revenue(rows) for key, rows in by_section.items()}
+    # 仅在公开栏目和已确认款全部覆盖时给出该公开店铺口径的整体情景。
+    complete = (
+        snapshot.store_root
+        and snapshot.store_scope is not None
+        and snapshot.store_scope.navigation_truncated is False
+        and all(item.status in {"success", "empty"} for item in sections)
+        and revenue.unknown_family_count == 0
+        and revenue.family_count == len(revenue.samples) > 0
+    )
+    complete_units = complete and all(item.monthly.units for item in revenue.samples)
+    complete_cents = complete and all(item.monthly.cents for item in revenue.samples)
+    revenue.public_store = AmazonRevenueTotals(
+        units=sample_totals.units if complete_units else None,
+        cents=sample_totals.cents if complete_cents else None,
+    )
 
 
 def _market_audience(title: str) -> str | None:

@@ -24,9 +24,11 @@ from mediaforge.rag.amazon_store_analysis import (
     build_benchmark_pair,
     build_product_matrix,
     build_store_lifecycle,
+    calculate_store_revenue,
     compare_store_samples,
     market_query,
     section_index,
+    select_revenue_samples,
     store_public_report,
     summarize_archive,
 )
@@ -34,10 +36,10 @@ from mediaforge.rag.amazon_store_collection import (
     FETCH_CONCURRENCY,
     SECTION_ASIN_LIMIT,
     SECTION_LIMIT,
-    collect_benchmark_listing,
     collect_benchmark_search,
     collect_evidence,
     collect_listing_date,
+    collect_market_listing,
     discover_sections,
     page_id,
     section_step,
@@ -247,7 +249,7 @@ async def _report_competition(
     async with amazon_public_client() as client:
         # 按公示产品类型挑两个代表款，每次两条搜索，每条按相关度最多核对两件。
         details = await asyncio.gather(
-            *(collect_benchmark_listing(client, item.asin) for item in targets)
+            *(collect_market_listing(client, item.asin) for item in targets)
         )
         queries = []
         for sample, listing in zip(targets, details, strict=True):
@@ -276,7 +278,7 @@ async def _report_competition(
         candidates = list(dict.fromkeys(asin for group in selected.values() for asin in group))
         for pos in range(0, len(candidates), 2):
             listings = await asyncio.gather(
-                *(collect_benchmark_listing(client, asin) for asin in candidates[pos : pos + 2])
+                *(collect_market_listing(client, asin) for asin in candidates[pos : pos + 2])
             )
             competition.listings.update((item.asin, item) for item in listings)
         competition.pairs = [
@@ -291,6 +293,29 @@ async def _report_competition(
             )
             is not None
         ]
+
+
+async def _report_revenue(
+    run: AmazonResearchRun, token: UUID, products: list[AmazonStoreSample]
+) -> None:
+    snapshot = run.snapshot
+    revenue = select_revenue_samples(snapshot, products)
+    snapshot.revenue = revenue
+    calculate_store_revenue(snapshot, revenue)
+    pending = [sample for sample in revenue.samples if sample.listing is None]
+    if not pending:
+        return
+    await store.checkpoint(run, token, "revenue")
+    async with amazon_public_client() as client:
+        for offset in range(0, len(pending), 2):
+            batch = pending[offset : offset + 2]
+            listings = await asyncio.gather(
+                *(collect_market_listing(client, sample.asin) for sample in batch)
+            )
+            for sample, listing in zip(batch, listings, strict=True):
+                sample.listing = listing
+            calculate_store_revenue(snapshot, revenue)
+            await store.checkpoint(run, token, "revenue")
 
 
 async def process_research(run_id: UUID, attempt: int) -> bool:
@@ -324,6 +349,7 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         snapshot.product_matrix = build_product_matrix(snapshot, listings)
         await _report_store_lifecycle(run, token, listings)
         await _report_competition(run, token, listings)
+        await _report_revenue(run, token, listings)
         sections = [
             item
             for item in snapshot.evidence
@@ -339,6 +365,9 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
             or snapshot.translation_status in {"incomplete", "failed"}
             or any(search.status == "failed" for search in snapshot.competition.searches)
             or any(item.problem for item in snapshot.competition.listings.values())
+            or any(
+                item.listing and item.listing.problem for item in snapshot.revenue.samples
+            )
         )
         status = "failed" if not useful else "partial_fail" if partial else "done"
         error = (
