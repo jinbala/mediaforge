@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 
 import { AmazonCategoryFields, AmazonCategoryReport } from '@/components/research/AmazonCategoryReport'
+import { AmazonProductCostsFields, AmazonProductReport } from '@/components/research/AmazonProductReport'
 import { AmazonRunDetails } from '@/components/research/AmazonRunDetails'
 import { AmazonSkills } from '@/components/research/AmazonSkills'
 import { AmazonScriptTools } from '@/components/research/AmazonScriptTools'
@@ -32,6 +33,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api'
 import { readCategoryInputs, type CategoryInputs } from '@/lib/amazon-category'
+import { readProductCosts } from '@/lib/amazon-product'
 import {
   AMAZON_BRIEF_KEY,
   AMAZON_BRIEF_LIMIT,
@@ -51,7 +53,6 @@ import {
   groupAmazonListings,
   readAmazonHistory,
   revealAmazonSample,
-  saveAmazonHistory,
   type AmazonListing,
   type AmazonReport,
   type AmazonRetryTarget,
@@ -303,34 +304,22 @@ export default function ResearchPage() {
     }
   }, [runningId])
 
-  async function runResearch(nextMode: ResearchMode, nextSource: string, samples = '', category?: CategoryInputs) {
+  async function runResearch(nextMode: ResearchMode, nextSource: string, samples = '', category?: CategoryInputs, productCosts?: ReturnType<typeof readProductCosts>) {
     if (loading || !nextSource.trim()) return
     setLoading(true)
     setError('')
     setPollError('')
     const body = { mode: nextMode, source: nextSource.trim(), keyword: keyword.trim(), review_samples: samples }
     try {
-      if (nextMode !== 'product') {
-        const result = await api.post<AmazonRun>('/v1/research/amazon/runs', {
-          ...body, category: nextMode === 'bestsellers' ? category : undefined, submission_id: crypto.randomUUID(),
-        })
-        setRun(result)
-        setLegacyReport(null)
-        setBrief('')
-      } else {
-        const result = await api.post<AmazonReport>('/v1/research/amazon', body)
-        setRun(null)
-        setLegacyReport(result)
-        setBrief(result.product?.image_brief ?? '')
-        if (historyKey) {
-          try {
-            saveAmazonHistory(historyKey, result)
-            setHistoryError('')
-          } catch {
-            setHistoryError('本次报告未能保存到浏览器历史。')
-          }
-        }
-      }
+      const result = await api.post<AmazonRun>('/v1/research/amazon/runs', {
+        ...body,
+        category: nextMode === 'bestsellers' ? category : undefined,
+        product_costs: nextMode === 'product' ? productCosts ?? undefined : undefined,
+        submission_id: crypto.randomUUID(),
+      })
+      setRun(result)
+      setLegacyReport(null)
+      setBrief(result.report?.product?.image_brief ?? '')
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '调研失败，请稍后重试。')
     } finally {
@@ -341,8 +330,10 @@ export default function ResearchPage() {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     try {
-      const category = mode === 'bestsellers' ? readCategoryInputs(new FormData(event.currentTarget)) : undefined
-      void runResearch(mode, source, mode === 'product' ? reviewSamples : '', category)
+      const form = new FormData(event.currentTarget)
+      const category = mode === 'bestsellers' ? readCategoryInputs(form) : undefined
+      const productCosts = mode === 'product' ? readProductCosts(form) : undefined
+      void runResearch(mode, source, mode === 'product' ? reviewSamples : '', category, productCosts)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '请检查类目调研参数。')
     }
@@ -403,8 +394,8 @@ export default function ResearchPage() {
       setMode(saved.mode)
       setSource(saved.source)
       setKeyword(saved.inputs.keyword)
-      setReviewSamples('')
-      setBrief('')
+      setReviewSamples(saved.inputs.review_samples ?? '')
+      setBrief(saved.report?.product?.image_brief ?? '')
       setPollError('')
       setError('')
       setHistoryOpen(false)
@@ -438,11 +429,11 @@ export default function ResearchPage() {
     )
   }
 
-  function sendBrief() {
+  function sendBrief(value = brief) {
     try {
       // 正文暂存在当前标签页，地址栏只传 ID，图片创作页用它匹配这次带入的需求。
       const id = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, '0')).join('')
-      sessionStorage.setItem(AMAZON_BRIEF_KEY, JSON.stringify({ id, brief: brief.trim() }))
+      sessionStorage.setItem(AMAZON_BRIEF_KEY, JSON.stringify({ id, brief: value.trim() }))
       router.push('/batch?' + AMAZON_BRIEF_PARAM + '=' + id)
     } catch {
       setError('带入失败，可复制图片需求后粘贴到图片创作。')
@@ -578,6 +569,7 @@ export default function ResearchPage() {
           </details>
         )}
         {mode === 'bestsellers' && <AmazonCategoryFields key={run?.mode === 'bestsellers' ? run.id : 'new-category'} saved={run?.mode === 'bestsellers' ? run.inputs.category : undefined} />}
+        {mode === 'product' && <AmazonProductCostsFields key={run?.mode === 'product' ? run.id : 'new-product'} saved={run?.mode === 'product' ? run.inputs.product_costs : undefined} />}
         <p className="sr-only" role="status">{loading ? '正在读取 Amazon 页面' : report ? '调研报告已就绪' : ''}</p>
       </form>
 
@@ -592,11 +584,12 @@ export default function ResearchPage() {
 
       {run && <AmazonRunDetails key={run.id} run={run} busy={loading} pollError={pollError} onRetry={(target, key) => void retryRun(target, key)} />}
 
+      {run?.mode === 'product' && <AmazonProductReport key={run.id} run={run} onBrief={sendBrief} onStore={(url) => openRelated('store', url)} />}
       {run?.mode === 'bestsellers' && <AmazonCategoryReport run={run} onProduct={(url) => openRelated('product', url)} />}
       {run?.mode === 'store' && run.snapshot.product_matrix && <AmazonStoreProductMatrix key={'matrix-' + run.id} run={run} matrix={run.snapshot.product_matrix} onOpen={(id) => void openRun(id)} />}
       {run?.snapshot.competition && !activeAmazonRun(run) && <AmazonStoreBenchmarks competition={run.snapshot.competition} />}
 
-      {report && run?.mode !== 'bestsellers' && (
+      {report && (!run || run.mode === 'store') && (
         <article className="space-y-5" aria-label="调研报告">
           <header className="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
             <div className="min-w-0 flex-1 space-y-1">
@@ -684,7 +677,7 @@ export default function ResearchPage() {
               <section className="space-y-3 rounded-lg border border-primary/25 bg-card p-4">
                 <Label htmlFor="image-brief" className="text-base font-medium">图片制作需求</Label>
                 <Textarea id="image-brief" className="min-h-32" maxLength={AMAZON_BRIEF_LIMIT} value={brief} onChange={(event) => setBrief(event.target.value)} />
-                <Button disabled={loading || !brief.trim()} onClick={sendBrief}>带入图片创作 <ArrowRight aria-hidden="true" /></Button>
+                <Button disabled={loading || !brief.trim()} onClick={() => sendBrief()}>带入图片创作 <ArrowRight aria-hidden="true" /></Button>
               </section>
             </>
           )}

@@ -154,6 +154,8 @@ async def submit_amazon_run(
 ) -> AmazonResearchRun:
     owner = _owner(principal)
     try:
+        if body.mode != "product" and body.product_costs is not None:
+            raise AmazonSourceError("单品成本仅用于单品调研任务。")
         if body.mode == "bestsellers":
             body.source = normalize_board(body.source)
             body.category = body.category or CategoryInputs()
@@ -169,7 +171,7 @@ async def submit_amazon_run(
             if body.category is not None:
                 raise AmazonSourceError("子类目和成本假设仅用于类目榜单任务。")
         body.keyword = body.keyword.strip()
-        body.review_samples = ""
+        body.review_samples = body.review_samples.strip() if body.mode == "product" else ""
     except AmazonSourceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:

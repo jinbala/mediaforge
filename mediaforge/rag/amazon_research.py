@@ -26,6 +26,7 @@ SUGGESTIONS = "https://completion.amazon.com/api/2017/suggestions"
 IMAGE_HOSTS = {"m.media-amazon.com", "images-na.ssl-images-amazon.com"}
 ASIN = re.compile(r"[A-Z0-9]{10}", re.I)
 PRODUCT_PATH = re.compile(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})(?:/|$)", re.I)
+REVIEW_PATH = re.compile(r"/product-reviews/([A-Z0-9]{10})", re.I)
 BESTSELLERS_PATH = re.compile(
     r"/(?:gp/bestsellers(?:/[\w-]+){0,3}|(?:Best-Sellers[\w-]*/)?zgbs(?:/[\w-]+){0,3})",
     re.I | re.ASCII,
@@ -80,7 +81,7 @@ class AmazonFetchError(Exception):
         self.url = url
 
 
-def normalize_source(mode: ResearchMode | Literal["search"], source: str) -> str:
+def normalize_source(mode: ResearchMode | Literal["search", "reviews"], source: str) -> str:
     # 按调研类型验证美国站地址并重建链接，去掉追踪参数，只保留榜单第二页参数。
     value = source.strip()
     if mode == "product" and ASIN.fullmatch(value):
@@ -108,6 +109,15 @@ def normalize_source(mode: ResearchMode | Literal["search"], source: str) -> str
             query = parse_qs(parsed.query).get("k", [""])[0].strip()
             if query and len(query) <= 100 and not any(ord(char) < 32 for char in query):
                 return f"{AMAZON}/s?{urlencode({'k': query})}"
+        if mode == "reviews" and (match := REVIEW_PATH.fullmatch(path)):
+            bucket = parse_qs(parsed.query).get("filterByStar", [""])[0]
+            sort = parse_qs(parsed.query).get("sortBy", ["recent"])[0]
+            allowed = {"one_star", "two_star", "three_star", "four_star", "five_star"}
+            if sort == "recent" and (not bucket or bucket in allowed):
+                params = {"sortBy": "recent", "pageNumber": "1"}
+                if bucket:
+                    params["filterByStar"] = bucket
+                return f"{AMAZON}/product-reviews/{match[1].upper()}?{urlencode(params)}"
         if mode == "store" and STORE_PATH.fullmatch(path):
             return f"{AMAZON}{quote(path, safe='/')}"
     except ValueError:
@@ -118,6 +128,7 @@ def normalize_source(mode: ResearchMode | Literal["search"], source: str) -> str
         "bestsellers": "请输入 Amazon 美国站 Best Sellers 榜单链接。",
         "store": "请输入 Amazon 美国站品牌店铺链接，地址中应包含 /stores/ 和 /page/。",
         "search": "Amazon 美国站搜索词无效。",
+        "reviews": "请输入 Amazon 美国站商品评论页。",
     }
     raise AmazonSourceError(message[mode])
 
@@ -580,7 +591,7 @@ async def _read_body(response: httpx.Response, limit: int) -> bytes:
 
 
 async def _fetch_page(
-    client: httpx.AsyncClient, mode: ResearchMode | Literal["search"], url: str
+    client: httpx.AsyncClient, mode: ResearchMode | Literal["search", "reviews"], url: str
 ) -> tuple[str, bytes]:
     try:
         async with asyncio.timeout(16):
@@ -604,6 +615,14 @@ async def _fetch_page(
     except httpx.HTTPError as exc:
         raise AmazonFetchError("Amazon 暂时无法访问，请稍后重试。", "network", url) from exc
     raise AmazonFetchError("Amazon 页面跳转次数过多，请使用最终页面链接。", "redirect", url)
+
+
+def search_url(keyword: str) -> str:
+    """Build the canonical US Amazon search URL shared by research flows."""
+    value = " ".join(keyword.split())
+    if not value or len(value) > 100 or any(ord(char) < 32 for char in value):
+        raise AmazonSourceError("Amazon 搜索词无效。")
+    return f"{AMAZON}/s?{urlencode({'k': value})}"
 
 
 def suggestion_request(keyword: str) -> httpx.URL:

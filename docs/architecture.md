@@ -9,7 +9,7 @@
 | 表格导入 | 「爆款商品库 → 导入商品」上传 CSV 或 Excel，匹配商品图片后导入，保存商品信息、图片和检索索引。 | [导入与检索 API](../mediaforge/gateway/routers/rag.py) · [导入测试](../tests/test_product_import.py) |
 | 商品链接导入与多图浏览 | 在商品库粘贴拼多多、抖音商城或 17 网分享内容。预览可切换已读取的图片，导入时首图作为封面，其余图片保留在商品相册。读取失败时可重新读取，符合条件时可手动上传。 | [链接导入](../frontend/src/components/ProductLinkImport.tsx) · [商品相册](../frontend/src/components/ProductPhotoGallery.tsx) · [本机浏览器助手](../frontend/product-browser/) · [多图导入测试](../tests/test_product_import.py) |
 | 商品可见性管理 | 在商品库隐藏本企业的公共参考条目，可在「已隐藏」恢复。企业私有商品提供删除操作。 | [商品 API](../mediaforge/gateway/routers/products.py) · [隐藏、恢复和删除测试](../tests/test_product_delete.py) |
-| 亚马逊调研 | 从工作台或侧栏打开「亚马逊调研」。单品沿用单页查询，类目和店铺通过任务采集。品牌店铺提交一个美国站链接即可识别首页并逐页采集，查看来源、状态、产品组合、价格带、归档、新品样本变化与公开竞品，展开同配色尺码。可下载带采样范围的逐栏目快照，从「历史记录」恢复或重试失败项。 | [调研页面](<../frontend/src/app/(app)/research/page.tsx>) · [任务 API](../mediaforge/gateway/routers/amazon_research.py) · [店铺编排](../mediaforge/orchestrator/amazon_research.py) · [栏目采集](../mediaforge/rag/amazon_store_collection.py) · [采集与恢复测试](../tests/test_amazon_store_depth.py)。按[调研流程](#亚马逊调研)复核 REQ-001。 |
+| 亚马逊调研 | 从工作台或侧栏打开「亚马逊调研」。单品、类目和店铺共用可恢复任务与历史。单品采集商品详情、最多 5 个搜索词、最多 4 个候选详情和四种评论样本；查看九个 REQ 专题、证据和下载，编辑成本/Listing/图片需求并串联图片创作。数据不足单项标明，不补造估算。 | [调研页面](<../frontend/src/app/(app)/research/page.tsx>) · [任务模型](../mediaforge/models/amazon_product.py) · [任务 API](../mediaforge/gateway/routers/amazon_research.py) · [单品编排](../mediaforge/orchestrator/amazon_product.py) · [商品采集](../mediaforge/rag/amazon_product_collection.py) · [专题规则](../mediaforge/workers/amazon_product_analysis.py) · [财务规则](../mediaforge/workers/amazon_product_finance.py) · [采集样本](../tests/test_amazon_product_collection.py) · [任务状态样本](../tests/test_amazon_product_runs.py)。按[调研流程](#亚马逊调研)复核 REQ-021–029。 |
 | 亚马逊调研工具（REQ-039–044） | 在「亚马逊调研 → 调研工具」运行关键词、Listing、PPC、FBA、到岸成本或 HS 查询。查看来源和缺项，下载 JSON 或从当前浏览器的「工具历史」恢复。 | [工具面板](../frontend/src/components/research/AmazonScriptTools.tsx) · [接口模型](../mediaforge/models/amazon_script_tools.py) · [验收步骤](#调研工具req-039044) · [固定样本测试](../tests/test_amazon_script_tools.py) |
 | 类目深调研（REQ-012–020） | 「亚马逊调研 → 类目榜单」，自动发现子榜，可指定子榜与成本；在历史恢复报告并下载逐榜证据。 | [类目编排](../mediaforge/orchestrator/amazon_category.py) · [类目采集](../mediaforge/rag/amazon_category_collection.py) · [分析规则](../mediaforge/rag/amazon_category_analysis.py) · [固定样本](../tests/test_amazon_category_depth.py) |
 | 亚马逊运营技能（REQ-045–095） | 「亚马逊调研 → 运营技能」，分组选择编号，填写事实、假设或授权报表汇总，生成和下载报告。 | [技能面板](../frontend/src/components/research/AmazonSkills.tsx) · [目录与分发](../mediaforge/workers/amazon_skills.py) · [基础技能](#亚马逊运营技能req-045060) · [进阶技能](#进阶运营技能req-061095) |
@@ -23,14 +23,14 @@
 
 调研表单关闭浏览器自动填充历史。验收时聚焦链接或联想词输入框，检查浏览器历史下拉框不遮挡页面，并粘贴链接按回车提交。
 
-1. **单品调研。** 填写 Amazon 美国站商品链接或 10 位 ASIN。报告展示公开页面可读的主图、商品价、评分、评分数、畅销排名和卖点。可补充每行一条的评论片段。报告分别标注商品公开页和手动录入来源，按评论片段提及次数整理主题，并据此给出产品复核及拍图建议。
+1. **单品深度调研（REQ-021–029）。** 填写 Amazon 美国站商品链接或 10 位 ASIN，可补充评论片段和成本输入。后台任务分别采商品页、最多 5 组查询（每组最多 30 张卡片）、最多 4 个候选详情及 1／2／3 星与近期评论页（每组只读第一页、最多 10 条正文），保存子项状态、URL 和采集时间。九个专题可独立查看和下载；原始证据提供 JSON。搜索结果数、样本内位置和品牌分布不代表搜索量、长期排名或市场份额；候选保留入选查询及理由。评论分别标明公开与手动来源，受限时保留已有数据和原因。售价保留页面币种，不自动换汇；销量需同站点同类目且 BSR 匹配的有日期、有来源的对标，人工费用不是内置费率。Listing 草案可编辑，商品参数需用户核验。图片专题提供七个基础图位、可选 A+ 图位和两段视频规划；选中的需求可带入现有图片创作。截图由镜像内 Chromium 离线渲染同次公开 HTML 的首屏，省略外部资源，缺少渲染器或捕获失败不影响报告；图像内容和质量未核实的项目保留未知。
 2. **类目榜单。** 粘贴美国站 Best Sellers 链接，例如 `https://www.amazon.com/gp/bestsellers/fashion`。主榜保留前 30 个可识别商品，最多采集 5 个子榜，每榜最多 20 件。可指定子榜和利润假设。结果支持逐榜查看、下载和跳入单品调研；原单页 API 保持兼容。
 3. **品牌店铺。** 粘贴带有 `/stores/` 和 `/page/` 的 Amazon 美国站店铺或栏目地址，只提交一次。也可从单品报告打开品牌店铺。采集从提交页查找品牌首页和导航，继续读取公开可发现的栏目和下拉子栏目。栏目按 UUID 去重，最多 30 个，商品卡片每栏最多 30 个 ASIN。查看「店铺栏目采集」里的原链接、最终链接、采集时间、方式、样本数量及原因。空页指公开导航或内容可以读取，页面没有可取样商品。动态占位、无法识别的结构或达到上限会显示样本不完整。Amazon 拒绝访问、拦截、超时或确定属于其他店铺时记录失败。
 4. 各模式都可填搜索联想词种子并下载 Markdown。店铺还可在「店铺栏目采集」下载同一任务的 JSON，按栏目保留原样本、主图、公开报价及原币种、评分和评分数。Amazon 美国站请求设置 USD 和英语显示偏好，取样仍以页面返回的币种为准。样本汇总按 ASIN，商品可回查所在栏目。联想读取失败时，已有栏目结果仍可查看和下载。
-5. 在单品报告编辑「图片制作需求」，再点「带入图片创作」。需求在当前浏览器标签页传入创作表单的风格要求。平台预选 Amazon 美国站，输出预选主图和详情图，使用已有[平台图规则](../mediaforge/workers/platform_rules.py)。填写自有商品原图、SKU、名称和类目后，按图片创作流程提交。
-6. 点击「历史记录」。品牌店铺和类目深调研的进度与样本保存在当前企业及账号下，可跨设备恢复。参数相同的在途请求共享任务，完成后用户可主动重新采集。同一提交标识用于安全重复请求。旧单页快照仍可在原浏览器打开。
+5. 在单品报告的 REQ-027 选择图位并编辑「图片制作需求」，再点「带入图片创作」。需求在当前浏览器标签页传入创作表单的风格要求。平台预选 Amazon 美国站，输出预选主图和详情图，使用已有[平台图规则](../mediaforge/workers/platform_rules.py)。填写自有商品原图、SKU、名称和类目后，按图片创作流程提交。
+6. 点击「历史记录」。三种深度调研的进度与样本保存在当前企业及账号下，可跨设备恢复。参数相同的在途请求共享任务，完成后用户可主动重新采集。同一提交标识用于安全重复请求。旧单页快照仍可在原浏览器打开。
 
-`POST /api/v1/research/amazon` 保留原单页协议与会话或 API Key 权限。新店铺任务通过 `POST /api/v1/research/amazon/runs` 返回 202 和任务 ID。页面轮询 `GET /amazon/runs/{id}`。Celery 的 `low` 队列读取 Amazon 公开 HTML，逐页写入 PostgreSQL。每项有请求时限，最多跟随 3 次已校验的跳转、并发 3 项，网络故障或超时最多读取两次。拒绝访问或限流保留状态与原因。举例，`POST /api/v1/research/amazon/runs/{id}/retry?target=failed&item_key=section-…` 可重试指定项，有效样本保留。队列派发失败或工作进程租约过期后，可从页面恢复原任务。日志记录任务 ID、序号、状态、类型和耗时，省略请求与响应正文。
+`POST /api/v1/research/amazon` 保留原单页协议与会话或 API Key 权限。新单品、类目、店铺任务通过 `POST /api/v1/research/amazon/runs` 返回 202 和任务 ID；页面轮询 `GET /amazon/runs/{id}`。Celery `low` 队列读取 Amazon 公开 HTML，将快照和报告写入 PostgreSQL。单品按商品、查询词、竞品和评论子页分别 checkpoint；并发不超过 3 项。单项失败不清除已成功结果，`POST /amazon/runs/{id}/retry?target=failed&item_key=search-1` 重试指定项；队列派发失败/租约过期可恢复原任务。登录限制、重定向目标按既有 Amazon URL 规范校验。日志只记录任务标识、阶段、状态、数量、脱敏错误类型和耗时，不记录请求/响应正文或手工评论。
 
 店铺翻译复用已配置的文本模型（`OPENROUTER_API_KEY`、`OPENROUTER_BASE_URL`、`AGENT_MODEL`）。通用栏目使用词表，每次任务对其余字段最多翻译两批，每批 35 个。缺译时页面继续显示原名称、ASIN、主图和链接。旧同步接口的翻译与返回格式保持原有行为。
 
@@ -47,6 +47,10 @@ REQ-003 复核时任选一组已采尺码，打开其 ASIN 来源，核对公开
 单品接口示例传入 `{"mode":"product","source":"B0033SHO4Q","keyword":"toy story"}`。成功响应包含 `source_url`、`collected_at`、`product`、`suggestions` 和 `warnings`。链接类型不匹配时返回 `422`，上游页面无法读取时返回 `502`。
 
 单页回归可用 `B0033SHO4Q` 和服装 Best Sellers 榜单，核对排名、主图和单品跳转。补充一条评论片段并查看来源与主题，然后编辑图片需求，检查带入「图片创作」表单。历史回归时，在原浏览器恢复改动前保存的报告，核对主图、联想词、采集时间和下载。
+
+**单品验收记录（REQ-021–029）。** 本次复用调研任务的 JSON 输入和快照列，无新增迁移。已有任务表的环境先更新 Gateway 和 `low` worker，再发布前端；需要回滚旧版本时，先停止新单品提交并导出需要留存的报告，不将新任务交给旧 worker。固定样本在隔离 Python 3.12 容器运行 `pytest -q tests/test_amazon_product*.py tests/test_amazon_research.py tests/test_amazon_store_depth.py tests/test_amazon_category_depth.py`，107 项通过（包括队列派发失败、重复提交、子项重试不重采成功项、账号与企业归属、旧模式兼容）。前端 `npm run build` 和改动范围 ESLint 通过。
+
+2026-11-28 在隔离容器用实际采集/分析模块试读美国站 `B0033SHO4Q`、服装 ASIN `B0HNJFCDNL`，未创建服务器任务。两件均得到九个专题、5 组各 30 张搜索卡片、4 个候选详情及首屏截图；分别取得 30／5 项规格、8／7 张图片，均未采到视频。两件的四组评论子页均返回非允许重定向，未登录或绕过；评论专题保留未知，请用有权提供的样本复核。尚需在部署环境从页面分别提交两件 ASIN，记录任务 ID，核对报告下载、历史恢复、新旧快照和图片表单带入；CI 和上线业务验收尚未验证。
 
 **产品组合与价格带（REQ-004）。** 在店铺结果打开「产品组合与价格带」。全店采样汇总以去重 ASIN 为单位，选择登记顺序中第一个有效 USD 单价。价带按 15、25、40、60 USD 分段，包含下界，排除上界。占比按具有有效 USD 单价的 ASIN 计算，单列没有价格以及非 USD、区间或无法确认为有效单价的商品。展开价格带可跳到用于计算的栏目商品。各栏目显示样本量、有效价位数、评分均值与公开评分数中位数，保留样本数。公开评分数可能跨同款共享，领先款每个确认同款组取一个最高公开评分数的 ASIN。
 

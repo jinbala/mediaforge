@@ -15,6 +15,7 @@ from mediaforge.models.amazon_research_run import (
     AmazonStoreSampleScope,
 )
 from mediaforge.orchestrator.amazon_category import collect_category
+from mediaforge.orchestrator.amazon_product import collect_product_depth
 from mediaforge.rag.amazon_research import SUGGESTIONS, _fetch_suggestions, amazon_public_client
 from mediaforge.rag.amazon_store_analysis import (
     archive,
@@ -302,6 +303,9 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         if run.mode == "bestsellers":
             await collect_category(run, token)
             return False
+        if run.mode == "product":
+            await collect_product_depth(run, token)
+            return False
         limited = await _collect_store(run, token)
         await store.checkpoint(run, token, "translation")
         await _localize(run)
@@ -347,14 +351,17 @@ async def process_research(run_id: UUID, attempt: int) -> bool:
         logger.error(
             "Amazon research run={} phase=collection reason={}", run.id, type(exc).__name__
         )
+        stage, error = {
+            "product": ("product", "单品调研未完成，已保存可用样本。"),
+            "bestsellers": ("boards", "榜单采集未完成，已保存可用样本。"),
+            "store": ("section", "栏目采集未完成，已保存可用样本。"),
+        }[run.mode]
         await store.checkpoint(
             run,
             token,
-            "boards" if run.mode == "bestsellers" else "section",
+            stage,
             status="partial_fail" if run.report else "failed",
-            error="榜单采集未完成，已保存可用样本。"
-            if run.mode == "bestsellers"
-            else "栏目采集未完成，已保存可用样本。",
+            error=error,
         )
     logger.info(
         "Amazon research run={} attempt={} duration_ms={}",

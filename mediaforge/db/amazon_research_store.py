@@ -42,6 +42,9 @@ def _fingerprint(inputs: AmazonResearchRunRequest) -> str:
     # 旧店铺活跃任务的指纹不包含后来新增的类目参数。
     if inputs.mode == "store":
         payload.pop("category", None)
+    # 不改变已在队列中的旧店铺和类目任务指纹。
+    if inputs.mode != "product":
+        payload.pop("product_costs", None)
     payload["source"] = source_key(inputs.mode, inputs.source)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -177,7 +180,7 @@ async def retry_run(
                 for item in run.snapshot.evidence
                 if item.status in {"pending", "failed", "incomplete"}
                 and item.code not in {"sample_limit", "duplicate", "store_mismatch",
-                                      "board_mismatch"}
+                                      "board_mismatch", "no_product_inputs"}
                 and (item_key is None or item.key == item_key)
             ]
             if target == "resume" and run.status not in {"queue_failed", "interrupted"}:

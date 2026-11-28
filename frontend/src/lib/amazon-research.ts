@@ -1,4 +1,5 @@
 import type { CategoryAnalysis, CategoryInputs } from './amazon-category'
+import type { ProductCosts, ProductDepth } from './amazon-product'
 
 export type ResearchMode = 'product' | 'bestsellers' | 'store'
 
@@ -190,7 +191,7 @@ export type AmazonStepStatus = 'pending' | 'success' | 'empty' | 'incomplete' | 
 export type AmazonRetryTarget = 'resume' | 'failed'
 export type AmazonRunSummary = {
   id: string
-  mode: 'store' | 'bestsellers'
+  mode: ResearchMode
   source: string
   canonical_source: string
   status: AmazonRunStatus
@@ -208,7 +209,7 @@ export type AmazonEvidence = {
   title: string
   title_zh: string | null
   status: AmazonStepStatus
-  kind: 'section' | 'suggestions' | 'board' | 'analysis'
+  kind: 'section' | 'suggestions' | 'board' | 'analysis' | 'product' | 'search' | 'competitor' | 'reviews'
   method: string
   collected_at: string | null
   reason: string | null
@@ -342,7 +343,7 @@ export type AmazonStoreCompetition = {
 
 export type AmazonRun = AmazonRunSummary & {
   error: string | null
-  inputs: { source: string; keyword: string; category?: CategoryInputs | null }
+  inputs: { source: string; keyword: string; review_samples: string; category?: CategoryInputs | null; product_costs?: ProductCosts | null }
   report: AmazonReport | null
   snapshot: {
     version: number
@@ -363,6 +364,7 @@ export type AmazonRun = AmazonRunSummary & {
     notes: string[]
     evidence: AmazonEvidence[]
     asin_sources: Record<string, string[]>
+    product_depth?: ProductDepth | null
     product_archive?: AmazonStoreArchive | null
     product_matrix?: AmazonStoreProductMatrix | null
     lifecycle?: AmazonStoreLifecycle | null

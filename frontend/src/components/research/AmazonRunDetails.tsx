@@ -9,11 +9,14 @@ import {
 
 const stageLabels: Record<string, string> = {
   queue: '派发任务', section: '采集店铺栏目', translation: '补充中文字段', listing_dates: '核对公开上架日期', competition: '采集公开竞品', report: '生成结果',
-  boards: '采集类目榜单', 'category-analysis': '生成类目专题',
+  boards: '采集类目榜单', 'category-analysis': '生成类目专题', product: '采集商品详情',
+  'product-search': '采集关键词样本', 'product-competitors': '读取竞品详情',
+  'product-reviews': '采集评论样本', 'product-analysis': '生成九个专题',
 }
 const roleLabels: Record<string, string> = {
   home: '首页', new: '新品', popular: '畅销', about: '关于我们', collection: '合集', category: '栏目',
-  main: '主榜', child: '自动发现子榜', manual: '指定子榜',
+  main: '主榜', child: '自动发现子榜', manual: '指定子榜', product: '商品详情',
+  search: '关键词搜索', competitor: '竞品详情', reviews: '星级/近期评论', analysis: '专题分析',
 }
 const retryable = (item: AmazonEvidence) => (
   ['pending', 'failed', 'incomplete'].includes(item.status)
@@ -32,12 +35,16 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
   const pending = range.section_status_counts.pending
   const canRetry = !active && run.attempt < 6
   const isStore = run.mode === 'store'
+  const isProduct = run.mode === 'product'
+  const productItems = snapshot.evidence.filter((item) => ['product', 'search', 'competitor', 'reviews', 'analysis'].includes(item.kind))
+  const productDone = productItems.filter((item) => ['success', 'empty'].includes(item.status)).length
   return (
     <section className="space-y-3 rounded-lg border bg-card p-4" aria-label="调研任务进度">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="font-medium">{isStore ? '店铺栏目采集' : '类目榜单调研进度'}</h3>
+        <h3 className="font-medium">{isStore ? '店铺栏目采集' : isProduct ? '单品深度调研进度' : '类目榜单调研进度'}</h3>
         <span role="status" className="text-sm">
           {amazonRunLabels[run.status]} · {stageLabels[run.stage] ?? '恢复采集'}
+          {isProduct && productItems.length > 0 && ' · ' + productDone + '/' + productItems.length + ' 个子项'}
           {range.section_count > 0 && ' · ' + (range.section_count - pending) + '/' + range.section_count + (isStore ? ' 个栏目' : ' 个榜单')}
         </span>
       </div>
@@ -89,7 +96,7 @@ export function AmazonRunDetails({ run, busy, pollError, onRetry }: {
               </div>
               {item.title_zh && <p className="text-xs text-muted-foreground" lang="en">{item.title}</p>}
               <p className="mt-1 text-xs text-muted-foreground">
-                {(item.role && roleLabels[item.role]) || (item.kind === 'section' ? '栏目' : item.kind === 'analysis' ? '专题分析' : '搜索联想')}
+                {(item.role && roleLabels[item.role]) || roleLabels[item.kind] || (item.kind === 'section' ? '栏目' : '搜索联想')}
                 {' · ' + amazonStepLabels[item.status] + ' · ' + item.method}
                 {item.observed_count !== null && ' · ' + item.observed_count + ' 个样本'}
                 {item.collected_at && ' · ' + amazonTime(item.collected_at)}
