@@ -11,6 +11,7 @@
 | 商品可见性管理 | 在商品库隐藏本企业的公共参考条目，可在「已隐藏」恢复。企业私有商品提供删除操作。 | [商品 API](../mediaforge/gateway/routers/products.py) · [隐藏、恢复和删除测试](../tests/test_product_delete.py) |
 | 亚马逊调研 | 从工作台或侧栏打开「亚马逊调研」。单品、类目和店铺共用可恢复任务与历史。单品采集商品详情、最多 5 个搜索词、最多 4 个候选详情和四种评论样本；查看九个 REQ 专题、证据和下载，编辑成本/Listing/图片需求并串联图片创作。数据不足单项标明，不补造估算。品牌店铺提交一个美国站链接即可识别首页并逐页采集，查看来源、状态、产品组合、价格带、归档、新品样本变化与公开竞品，核对销量与营收情景、生命周期、价带和增长机会，展开同配色尺码。可下载带采样范围的逐栏目快照，从「历史记录」恢复或重试失败项。 | [调研页面](<../frontend/src/app/(app)/research/page.tsx>) · [任务模型](../mediaforge/models/amazon_product.py) · [任务 API](../mediaforge/gateway/routers/amazon_research.py) · [单品编排](../mediaforge/orchestrator/amazon_product.py) · [商品采集](../mediaforge/rag/amazon_product_collection.py) · [专题规则](../mediaforge/workers/amazon_product_analysis.py) · [财务规则](../mediaforge/workers/amazon_product_finance.py) · [采集样本](../tests/test_amazon_product_collection.py) · [任务状态样本](../tests/test_amazon_product_runs.py) · [店铺编排](../mediaforge/orchestrator/amazon_research.py) · [栏目采集](../mediaforge/rag/amazon_store_collection.py) · [采集与恢复测试](../tests/test_amazon_store_depth.py)。按[调研流程](#亚马逊调研)复核 REQ-021–029 与 REQ-001。 |
 | 亚马逊调研工具（REQ-039–044） | 在「亚马逊调研 → 调研工具」运行关键词、Listing、PPC、FBA、到岸成本或 HS 查询。查看来源和缺项，下载 JSON 或从当前浏览器的「工具历史」恢复。 | [工具面板](../frontend/src/components/research/AmazonScriptTools.tsx) · [接口模型](../mediaforge/models/amazon_script_tools.py) · [验收步骤](#调研工具req-039044) · [固定样本测试](../tests/test_amazon_script_tools.py) |
+| 品牌店铺综合报告（REQ-010／011） | 「亚马逊调研 → 品牌店铺 → Amazon 调研工作台」默认打开店铺综合报告；产品组合、竞争定位、销量与营收估算、增长策略与运营建议可分别预览和下载。 | [现有工作台](../frontend/src/components/research/AmazonResearchWorkspace.tsx) · [报告组装](../mediaforge/workers/amazon_research_export.py) · [运营建议规则](../mediaforge/workers/amazon_store_recommendations.py) · [验收](#店铺综合报告和运营建议) |
 | 类目深调研（REQ-012–020） | 「亚马逊调研 → 类目榜单」，自动发现子榜，可指定子榜与成本；在历史恢复报告并下载逐榜证据。 | [类目编排](../mediaforge/orchestrator/amazon_category.py) · [类目采集](../mediaforge/rag/amazon_category_collection.py) · [分析规则](../mediaforge/rag/amazon_category_analysis.py) · [固定样本](../tests/test_amazon_category_depth.py) |
 | 亚马逊调研共用功能（REQ-030–038） | 三种模式完成或部分完成后，在「Amazon 调研工作台」预览、下载专题和证据，重试中文补充，打开来源任务或比较上期。 | [工作台](../frontend/src/components/research/AmazonResearchWorkspace.tsx) · [共用 API](../mediaforge/gateway/routers/amazon_research.py) · [验收场景](#共用调研能力req-030038) |
 | 亚马逊运营技能（REQ-045–095） | 「亚马逊调研 → 运营技能」，分组选择编号，填写事实、假设或授权报表汇总，生成和下载报告。 | [技能面板](../frontend/src/components/research/AmazonSkills.tsx) · [目录与分发](../mediaforge/workers/amazon_skills.py) · [基础技能](#亚马逊运营技能req-045060) · [进阶技能](#进阶运营技能req-061095) |
@@ -21,6 +22,13 @@
 | 智能助手 | 对话检索参考图，按确认卡片核对生成配置，确认后提交任务并跟踪进度。 | [助手 API](../mediaforge/gateway/routers/agent.py) · [助手工具](../mediaforge/orchestrator/agent_tools.py) · [任务确认测试](../tests/test_agent_production_controls.py) |
 
 ## 亚马逊调研
+
+### 店铺综合报告和运营建议
+
+- **REQ-010：** 品牌店铺提交或从历史打开原任务，在「Amazon 调研工作台」切换四个专题和综合报告。分别点击「下载」或下载完整报告；页面预览与下载使用同一任务的 `GET /api/v1/research/amazon/runs/{id}/reports/{section}`，原始证据仍从工作台下载。营收复用已有低／中／高情景，区分样本小计与公开店铺合计；旧快照缺少情景则显示未知，不因打开报告重新采集。综合报告列出覆盖范围、代表款、值得核对的价格带和下一步。
+- **REQ-011：** 在「增长策略与运营建议」抽查 Listing、广告、评论、促销和库存，核对目标 ASIN、适用对标或人群、发现、证据编号和验证指标。按 30／60／90 天安排核对、测试和复盘；证据不支持的渠道明确留空，不推断促销效果、实际库存或评论原因，不执行任何运营动作。
+
+固定样本执行 `uv run pytest -q tests/test_amazon_store_recommendations.py tests/test_amazon_store_depth.py tests/test_amazon_research_export.py tests/test_amazon_research_common_api.py`。本地隔离容器上这四个测试文件共 44 项通过，前端 `npm run build` 及定向 ESLint 通过。用本机固定样本 API（任务 `00000000-0000-4000-8000-000000000010`）在浏览器确认默认综合报告，逐份核对五个预览标题、下载文件名及 Markdown 内容。部署后用 Oakgarden 登录实采，逐份核对 ASIN、证据和估算范围，再用缺项和旧报告确认不展示虚假的零值。无新接口、队列或数据库迁移。
 
 ### 共用调研能力（REQ-030–038）
 

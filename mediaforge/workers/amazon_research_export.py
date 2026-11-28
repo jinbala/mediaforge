@@ -20,7 +20,11 @@ from mediaforge.models.amazon_research_export import (
     ResearchSectionEvidence,
     ResearchSourceSamples,
 )
-from mediaforge.models.amazon_research_run import AmazonResearchRun
+from mediaforge.models.amazon_research_run import AmazonResearchRun, AmazonRevenueTotals
+from mediaforge.workers.amazon_store_recommendations import (
+    StoreRecommendation,
+    build_store_recommendations,
+)
 
 _CATEGORY = (
     ("opportunities", "细分机会与价格分布"),
@@ -41,11 +45,11 @@ _PRODUCT = (
     ("REQ-029", "综合决策与验证计划"),
 )
 _STORE = (
-    ("product_matrix", "产品矩阵"),
-    ("competition", "竞争格局"),
-    ("revenue", "销量与营收"),
-    ("growth", "增长与新品观察"),
-    ("summary", "综合报告"),
+    ("product_matrix", "产品组合"),
+    ("competition", "竞争定位"),
+    ("revenue", "销量与营收估算"),
+    ("growth", "增长策略与运营建议"),
+    ("summary", "店铺综合报告"),
 )
 _OBSERVED = {"success", "empty", "incomplete"}
 _MAX_SOURCES = 96
@@ -324,6 +328,19 @@ def _collect_sources(run: AmazonResearchRun, sources: _Sources, include_samples:
                     count=None if item.problem else 1,
                     reuse=True,
                 )
+        if revenue := snapshot.revenue:
+            for sample in revenue.samples:
+                if item := sample.listing:
+                    sources.add(
+                        "revenue_listing",
+                        item.title or item.asin,
+                        item.url,
+                        item.collected_at,
+                        status="failed" if item.problem else "success",
+                        reason=item.problem,
+                        count=None if item.problem else 1,
+                        reuse=True,
+                    )
         if lifecycle := snapshot.lifecycle:
             for item in lifecycle.dates:
                 sources.add(
@@ -548,10 +565,146 @@ def _money(cents: int) -> str:
     return f"{cents / 100:.2f}"
 
 
+def _revenue_cells(totals: AmazonRevenueTotals, months: int = 1) -> list[ReportCell]:
+    # 渲染已保存的低／中／高值；年化只沿用快照的月份倍数，不推断季节性。
+    units = [value * months for value in totals.units] if totals.units else [None] * 3
+    cents = [_money(value * months) for value in totals.cents] if totals.cents else [None] * 3
+    return [*units, *cents]
+
+
+_SCENARIO_COLUMNS = [
+    "低（件）",
+    "中（件）",
+    "高（件）",
+    "低（USD）",
+    "中（USD）",
+    "高（USD）",
+]
+
+
+def _store_revenue(
+    run: AmazonResearchRun,
+    section: ResearchSectionEvidence,
+    sources: _Sources,
+) -> None:
+    revenue = run.snapshot.revenue
+    if revenue is None:
+        section.notes = ["未知：快照没有可用的营收估算。标价及评分数不能换算为营收。"]
+        return
+    section.sample_count = len(revenue.samples)
+    section.source_ids = list(
+        dict.fromkeys(
+            [
+                *sources.ids("section", "revenue_listing"),
+                *(
+                    sources.by_location[(sample.listing.url, sample.listing.collected_at)]
+                    for sample in revenue.samples
+                    if sample.listing
+                    and (sample.listing.url, sample.listing.collected_at) in sources.by_location
+                ),
+            ]
+        )
+    )
+    covered = sum(sample.monthly.units is not None for sample in revenue.samples)
+    priced = sum(sample.monthly.cents is not None for sample in revenue.samples)
+    whole = revenue.public_store
+    # 只有主线已有估算标记为估算；样本合计不能冒充整店覆盖。
+    section.status = "complete" if whole.cents is not None else "partial" if covered else "unknown"
+    section.provenance = ["observed", "estimate"] if covered else ["unknown"]
+    if covered and whole.cents is None:
+        section.provenance.append("unknown")
+    low, mid, high = revenue.factors_percent
+    section.notes = [
+        f"已确认款 {revenue.family_count}；归属未知 ASIN {revenue.unknown_family_count}；"
+        f"代表款 {revenue.representative_count}，销量和营收样本分别覆盖 {covered}、{priced} 款。",
+        f"低／中／高按公开近月购买提示分别乘 {low}%／{mid}%／{high}%（四舍五入到件）；"
+        "营收＝情景件数 × 该款有效 USD 单价。无同口径报价或购买提示时保留未知。",
+        f"年化＝月情景 × {revenue.annual_months}，未考虑季节性、退货或利润。"
+        "同款只取一个代表 ASIN；栏目按款在已观察栏目的归属等分，余数按保存顺序分配。",
+        "仅公开栏目与确认款均覆盖时提供公开店铺合计；样本合计不是店铺的实际营收。",
+    ]
+    budget = sources.section_budget()
+    labels = {"representative": "代表款", "tail": "长尾样本", "sample": "可估样本合计"}
+    section.tables = [
+        budget.table(
+            "月度与年化情景",
+            ["范围", "周期", *_SCENARIO_COLUMNS],
+            (
+                (name, period, *_revenue_cells(totals, months))
+                for name, totals in [
+                    *((labels.get(key, key), row) for key, row in revenue.monthly.items()),
+                    ("公开店铺", whole),
+                ]
+                for period, months in (("月", 1), ("年化", revenue.annual_months))
+            ),
+            "estimate",
+        ),
+        budget.table(
+            "栏目月度分摊",
+            ["栏目键", *_SCENARIO_COLUMNS],
+            ((key, *_revenue_cells(totals)) for key, totals in revenue.section_monthly.items()),
+            "estimate",
+        ),
+        budget.table(
+            "按款核对估算依据",
+            [
+                "代表 ASIN",
+                "同款组",
+                "分组",
+                "归属栏目",
+                "购买提示原文",
+                "USD 单价",
+                *_SCENARIO_COLUMNS,
+            ],
+            (
+                (
+                    row.asin,
+                    row.family_asin,
+                    labels[row.segment],
+                    ", ".join(row.sections),
+                    row.listing.monthly_bought_label if row.listing else None,
+                    _money(row.price_cents) if row.price_cents is not None else None,
+                    *_revenue_cells(row.monthly),
+                )
+                for row in revenue.samples
+            ),
+            "estimate",
+            asins=(row.members for row in revenue.samples),
+        ),
+    ]
+
+
+def _recommendation_sources(
+    run: AmazonResearchRun,
+    sources: _Sources,
+    row: StoreRecommendation,
+) -> str:
+    ids = [sources.by_key[key] for key in row.source_keys if key in sources.by_key]
+    if competition := run.snapshot.competition:
+        if row.competitor_asin:
+            for asin in (row.target_asin, row.competitor_asin):
+                listing = competition.listings.get(asin)
+                if listing and (
+                    source := sources.by_location.get((listing.url, listing.collected_at))
+                ):
+                    ids.append(source)
+    if row.channel == "库存" and run.snapshot.revenue:
+        for sample in run.snapshot.revenue.samples:
+            listing = sample.listing
+            if listing and listing.asin == row.target_asin:
+                if source := sources.by_location.get((listing.url, listing.collected_at)):
+                    ids.append(source)
+    return ", ".join(dict.fromkeys(ids))
+
+
 def _store_sections(run: AmazonResearchRun, sources: _Sources) -> list[ResearchSectionEvidence]:
     snapshot = run.snapshot
     product, peers, revenue, growth, summary = [_unknown(key, title) for key, title in _STORE]
-    observed = sources.ids("section", "legacy_report")
+    observed = [
+        row.id
+        for row in sources.rows
+        if row.kind in {"section", "legacy_report"} and row.provenance == "observed"
+    ]
     product.source_ids = observed
     if matrix := snapshot.product_matrix:
         budget = sources.section_budget()
@@ -751,9 +904,7 @@ def _store_sections(run: AmazonResearchRun, sources: _Sources) -> list[ResearchS
                 ),
             ),
         ]
-    revenue.notes = [
-        "未知：快照没有已核实的销量、营收或可用的营收估算。标价及评分数不能换算为营收。"
-    ]
+    _store_revenue(run, revenue, sources)
     growth.source_ids = list(dict.fromkeys(observed + sources.ids("listing_date")))
     growth.notes = ["未知：销量增长和上新节奏未获核实；公开样本的出现或消失不代表上架或下架。"]
     if lifecycle := snapshot.lifecycle:
@@ -822,7 +973,76 @@ def _store_sections(run: AmazonResearchRun, sources: _Sources) -> list[ResearchS
                     asins=(ids for _, _, ids in _change_groups(change)),
                 )
             )
-    summary.source_ids = observed
+    recommendations = build_store_recommendations(run)
+    if recommendations:
+        budget = sources.section_budget()
+        growth.status = "partial"
+        growth.provenance = ["observed", "estimate", "unknown"]
+        growth.notes.append("REQ-011：以下为有证据的验证计划，不是已执行的运营动作。")
+        covered_channels = {row.channel for row in recommendations}
+        missing_channels = [
+            name
+            for name in ("Listing", "广告", "评论", "促销", "库存")
+            if name not in covered_channels
+        ]
+        if missing_channels:
+            growth.notes.append("证据不足，暂不推荐：" + "、".join(missing_channels) + "。")
+        growth.source_ids = list(
+            dict.fromkeys(
+                [
+                    *growth.source_ids,
+                    *peers.source_ids,
+                    *revenue.source_ids,
+                ]
+            )
+        )
+        growth.tables.append(
+            budget.table(
+                "30／60／90 天运营验证计划",
+                [
+                    "渠道",
+                    "期限（天）",
+                    "目标 ASIN",
+                    "对标 ASIN",
+                    "待验证人群",
+                    "问题或线索",
+                    "下一步",
+                    "验收指标",
+                    "证据编号",
+                ],
+                (
+                    (
+                        row.channel,
+                        row.horizon,
+                        row.target_asin,
+                        row.competitor_asin,
+                        row.audience,
+                        row.finding,
+                        row.action,
+                        row.verification,
+                        _recommendation_sources(run, sources, row),
+                    )
+                    for row in recommendations
+                ),
+                "estimate",
+                asins=(
+                    [row.target_asin, *([row.competitor_asin] if row.competitor_asin else [])]
+                    for row in recommendations
+                ),
+            )
+        )
+    else:
+        growth.notes.append("Listing、广告、评论、促销和库存暂无可关联样本的建议，待补证据。")
+    summary.source_ids = list(
+        dict.fromkeys(
+            [
+                *observed,
+                *peers.source_ids,
+                *revenue.source_ids,
+                *growth.source_ids,
+            ]
+        )
+    )
     budget = sources.section_budget()
     archive = snapshot.product_archive
     summary.sample_count = (
@@ -850,7 +1070,60 @@ def _store_sections(run: AmazonResearchRun, sources: _Sources) -> list[ResearchS
                 "observed",
             )
         ]
+    if summary.sample_count:
+        pair_count = len(snapshot.competition.pairs) if snapshot.competition else 0
+        summary.notes.extend(
+            [
+                f"本次覆盖 {summary.sample_count} 个去重 ASIN、{len(observed)} 个可回查采集来源。",
+                f"对标：{pair_count} 个已保存配对；结论只适用于覆盖样本。",
+            ]
+        )
+        if matrix := snapshot.product_matrix:
+            busiest = max(
+                (band for band in matrix.price_bands if band.asins),
+                key=lambda band: len(band.asins),
+                default=None,
+            )
+            if busiest:
+                upper = _money(busiest.max_cents) if busiest.max_cents is not None else "无上限"
+                summary.notes.append(
+                    f"优先复核样本最密集价带：USD {_money(busiest.min_cents)}–{upper}，"
+                    f"{len(busiest.asins)} 个有效报价 ASIN；样本密集不代表需求量更高。"
+                )
+            if matrix.rating_leaders:
+                asins = "、".join(row.asin for row in matrix.rating_leaders[:3])
+                summary.notes.append(f"可优先核对公开评分数领先款：{asins}；这不是销量排名。")
+        monthly = snapshot.revenue.monthly.get("sample") if snapshot.revenue else None
+        if monthly and monthly.cents:
+            summary.provenance.append("estimate")
+            summary.notes.append(
+                f"可估样本月营收低／中／高（USD）：{'／'.join(map(_money, monthly.cents))}；"
+                "不视为全店实销，覆盖与口径见营收专题。"
+            )
+        else:
+            summary.notes.append("暂不能复核月营收，先核对购买提示与同款同币种有效单价。")
+        if recommendations:
+            if "estimate" not in summary.provenance:
+                summary.provenance.append("estimate")
+            summary.notes.append("先执行 30 天核对项；广告与促销在证据和毛利允许后再验证。")
+            summary.tables.append(
+                budget.table(
+                    "优先行动",
+                    ["渠道", "期限（天）", "目标 ASIN", "下一步"],
+                    (
+                        (row.channel, row.horizon, row.target_asin, row.action)
+                        for row in recommendations
+                    ),
+                    "estimate",
+                )
+            )
+        else:
+            summary.notes.append("下一步：从产品组合和竞争定位专题补齐可核验样本，再制定行动。")
     summary.notes += [budget.text(note) for note in budget.take(snapshot.notes, 12)]
+    for section in (product, peers, revenue, growth, summary):
+        section.requirements = ["REQ-010"]
+    growth.requirements.append("REQ-011")
+    summary.requirements.append("REQ-011")
     return [product, peers, revenue, growth, summary]
 
 
@@ -1055,8 +1328,10 @@ def _markdown_lines(
             f"- 采样上限：主榜 {scope.main_limit}，子榜 {scope.child_limit} 个，"
             f"每子榜 {scope.child_asin_limit} ASIN；发现过程截断：{scope.discovery_truncated}"
         )
-    yield ("- 口径：observed＝公开样本；estimate＝推断或情景；"
-           "manual＝用户输入；unknown＝未知，不按零处理。")
+    yield (
+        "- 口径：observed＝公开样本；estimate＝推断或情景；"
+        "manual＝用户输入；unknown＝未知，不按零处理。"
+    )
     if report.supplemental_notes:
         yield "- 用户补充（manual；未独立核验、不计入实采指标）：" + _md(report.supplemental_notes)
     if report.truncated:
